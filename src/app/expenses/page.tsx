@@ -24,7 +24,7 @@ import { AppShell } from '@/components/layout/app-shell';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card } from '@/components/ui/card';
-import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogClose } from '@/components/ui/dialog';
+import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter, DialogClose } from '@/components/ui/dialog';
 import { useToast } from '@/components/ui/toast';
 import { repository } from '@/lib/services/repository';
 import { formatMoney } from '@/lib/calculations/financials';
@@ -426,7 +426,7 @@ export default function ExpensesPage() {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2 text-xs">
+        <DialogBody className="space-y-4 text-xs">
           <div>
             <label className="font-bold text-slate-700 dark:text-slate-300">Faahfaahinta Kharashka *</label>
             <Input
@@ -488,7 +488,7 @@ export default function ExpensesPage() {
               className="mt-1"
             />
           </div>
-        </div>
+        </DialogBody>
 
         <DialogFooter className="flex gap-2">
           <Button variant="outline" onClick={() => setIsCreateModalOpen(false)}>
@@ -512,7 +512,7 @@ export default function ExpensesPage() {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2 text-xs">
+        <DialogBody className="space-y-4 text-xs">
           <div>
             <label className="font-bold text-slate-700 dark:text-slate-300">Faahfaahinta Kharashka *</label>
             <Input
@@ -583,7 +583,7 @@ export default function ExpensesPage() {
               className="mt-1 text-slate-600"
             />
           </div>
-        </div>
+        </DialogBody>
 
         <DialogFooter className="flex gap-2">
           <Button variant="outline" onClick={() => setEditingExpense(null)}>

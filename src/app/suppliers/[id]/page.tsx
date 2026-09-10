@@ -24,7 +24,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogClose } from '@/components/ui/dialog';
+import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter, DialogClose } from '@/components/ui/dialog';
 import { useToast } from '@/components/ui/toast';
 import { repository } from '@/lib/services/repository';
 import { formatMoney } from '@/lib/calculations/financials';
@@ -416,7 +416,7 @@ export default function SupplierDetailPage() {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4 py-2 text-xs">
+          <DialogBody className="space-y-4 text-xs">
             <div>
               <label className="font-bold text-slate-700 dark:text-slate-300">Magaca Qofka / Shirkadda *</label>
               <Input
@@ -473,7 +473,7 @@ export default function SupplierDetailPage() {
                 onChange={(e) => setEditReason(e.target.value)}
               />
             </div>
-          </div>
+          </DialogBody>
 
           <DialogFooter className="flex gap-2">
             <Button variant="outline" onClick={() => setIsEditSupplierOpen(false)}>
@@ -497,7 +497,7 @@ export default function SupplierDetailPage() {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4 py-2 text-xs">
+          <DialogBody className="space-y-4 text-xs">
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="font-bold text-slate-700 dark:text-slate-300">Invoice / Reference #</label>
@@ -577,7 +577,7 @@ export default function SupplierDetailPage() {
                 className="bg-white dark:bg-slate-900"
               />
             </div>
-          </div>
+          </DialogBody>
 
           <DialogFooter className="flex gap-2">
             <Button variant="outline" onClick={() => setCorrectingTx(null)}>

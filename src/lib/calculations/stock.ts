@@ -116,3 +116,64 @@ export function getStockStatus(
     badgeClass: 'bg-emerald-100 text-emerald-800 border-emerald-200 dark:bg-emerald-950/70 dark:text-emerald-300 dark:border-emerald-800',
   };
 }
+
+/**
+ * Standard selectable units
+ */
+export const ALLOWED_INCOMING_UNITS = [
+  { value: 'pcs', label: 'PCS' },
+  { value: 'carton', label: 'Carton' },
+  { value: 'jawan', label: 'Jawan' },
+] as const;
+
+export const ALLOWED_SELLING_UNITS = [
+  { value: 'pcs', label: 'PCS' },
+  { value: 'carton', label: 'Carton' },
+  { value: 'jawan', label: 'Jawan' },
+  { value: 'kg', label: 'KG' },
+] as const;
+
+/**
+ * Calculates minimum sellable quantity based on unit division.
+ * Example: division = 4 -> 1 / 4 = 0.25; division = 10 -> 1 / 10 = 0.10.
+ */
+export function calculateMinSellableQty(unitDivision: number = 1): number {
+  const div = Math.max(1, Number(unitDivision) || 1);
+  return Math.round((1 / div) * 10000) / 10000;
+}
+
+/**
+ * Validates if the sold quantity aligns with the configured fractional division / minimum step.
+ * Example: if minSellableQty is 0.25 (division = 4), 0.25, 0.50, 0.75, 1.00 are valid; 0.10, 0.20 are invalid.
+ */
+export function isValidSellableQuantity(
+  quantity: number,
+  minSellableQty: number = 1,
+  unit: string = ''
+): { valid: boolean; reason?: string } {
+  if (isNaN(quantity) || quantity <= 0) {
+    return {
+      valid: false,
+      reason: 'Geli tiro sax ah oo ka weyn 0 (Quantity must be greater than 0).',
+    };
+  }
+
+  const step = minSellableQty > 0 ? minSellableQty : 1;
+  const ratio = quantity / step;
+  const nearestInteger = Math.round(ratio);
+  const diff = Math.abs(ratio - nearestInteger);
+
+  if (diff > 0.001) {
+    const ex1 = step;
+    const ex2 = Number((step * 2).toFixed(4));
+    const ex3 = Number((step * 3).toFixed(4));
+    const ex4 = Number((step * 4).toFixed(4));
+    return {
+      valid: false,
+      reason: `Tirada (${quantity} ${unit}) ma aha qeyb sax ah. Alaabtan waxaa loo qaybiyay (${step} ${unit}). Qiyaasaha la oggol yahay: ${ex1}, ${ex2}, ${ex3}, ${ex4} ${unit}...`,
+    };
+  }
+
+  return { valid: true };
+}
+

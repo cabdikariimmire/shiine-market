@@ -31,7 +31,7 @@ import {
   PaymentMethod,
   InvoiceScanResult
 } from '@/types';
-import { calculateCostPerBaseUnit } from '@/lib/calculations/stock';
+import { calculateCostPerBaseUnit, calculateMinSellableQty } from '@/lib/calculations/stock';
 import { generateId } from '@/lib/utils';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 
@@ -796,6 +796,8 @@ class ShopRepository {
       sell_price: number;
       selling_unit: string;
       conversion_factor: number;
+      unit_division?: number;
+      min_sellable_qty?: number;
       stock_quantity: number;
       minimum_stock: number;
       supplier_id?: string;
@@ -828,6 +830,11 @@ class ShopRepository {
       throw new Error(`Khalad abuurista alaabta: ${prodErr.message}`);
     }
 
+    const division = Math.max(1, Number(variantData.unit_division) || 1);
+    const minSellable = variantData.min_sellable_qty !== undefined && Number(variantData.min_sellable_qty) > 0
+      ? Number(variantData.min_sellable_qty)
+      : calculateMinSellableQty(division);
+
     const newVariant = {
       id: variantId,
       product_id: productId,
@@ -839,6 +846,8 @@ class ShopRepository {
       sell_price: Number(variantData.sell_price) || 0,
       selling_unit: variantData.selling_unit || 'kg',
       conversion_factor: Number(variantData.conversion_factor) || 1,
+      unit_division: division,
+      min_sellable_qty: minSellable,
       stock_quantity: Number(variantData.stock_quantity) || 0,
       minimum_stock: Number(variantData.minimum_stock) || 10,
       supplier_id: variantData.supplier_id || null,
@@ -849,11 +858,27 @@ class ShopRepository {
       updated_at: new Date().toISOString(),
     };
 
-    const { data: varCreated, error: varErr } = await supabase
+    let { data: varCreated, error: varErr } = await supabase
       .from('product_variants')
       .insert([newVariant])
       .select()
       .single();
+
+    if (varErr && (varErr.message?.includes('min_sellable_qty') || varErr.message?.includes('unit_division') || varErr.code === 'PGRST204')) {
+      console.warn('[Supabase Schema] Column min_sellable_qty/unit_division not in schema cache. Saving variant and falling back...');
+      const { unit_division, min_sellable_qty, ...fallbackVariant } = newVariant;
+      const fallbackRes = await supabase
+        .from('product_variants')
+        .insert([fallbackVariant])
+        .select()
+        .single();
+      if (!fallbackRes.error && fallbackRes.data) {
+        varCreated = { ...fallbackRes.data, unit_division, min_sellable_qty };
+        varErr = null;
+      } else if (fallbackRes.error) {
+        varErr = fallbackRes.error;
+      }
+    }
 
     if (varErr) {
       throw new Error(`Khalad abuurista variant: ${varErr.message}`);
@@ -903,24 +928,45 @@ class ShopRepository {
       }).eq('id', prev.product_id);
     }
 
-    const { data: updated, error } = await supabase
+    const variantUpdates: any = {
+      variant_name: updates.variant_name || updates.variantName || prev.variant_name,
+      sku: updates.sku !== undefined ? updates.sku : prev.sku,
+      barcode: updates.barcode !== undefined ? updates.barcode : prev.barcode,
+      buy_price: updates.buy_price !== undefined ? updates.buy_price : (updates.buyPrice !== undefined ? updates.buyPrice : prev.buy_price),
+      purchase_unit: updates.purchase_unit || updates.purchaseUnit || prev.purchase_unit,
+      sell_price: updates.sell_price !== undefined ? updates.sell_price : (updates.sellPrice !== undefined ? updates.sellPrice : prev.sell_price),
+      selling_unit: updates.selling_unit || updates.sellingUnit || prev.selling_unit,
+      conversion_factor: updates.conversion_factor !== undefined ? updates.conversion_factor : (updates.conversionFactor !== undefined ? updates.conversionFactor : prev.conversion_factor),
+      unit_division: updates.unit_division !== undefined ? updates.unit_division : (updates.unitDivision !== undefined ? updates.unitDivision : (prev.unit_division || 1)),
+      min_sellable_qty: updates.min_sellable_qty !== undefined ? updates.min_sellable_qty : (updates.minSellableQty !== undefined ? updates.minSellableQty : (prev.min_sellable_qty || calculateMinSellableQty(updates.unit_division || updates.unitDivision || prev.unit_division || 1))),
+      minimum_stock: updates.minimum_stock !== undefined ? updates.minimum_stock : (updates.minimumStock !== undefined ? updates.minimumStock : prev.minimum_stock),
+      supplier_id: updates.supplier_id !== undefined ? updates.supplier_id : (updates.supplierId !== undefined ? updates.supplierId : prev.supplier_id),
+      updated_at: new Date().toISOString(),
+    };
+
+    let { data: updated, error } = await supabase
       .from('product_variants')
-      .update({
-        variant_name: updates.variant_name || updates.variantName || prev.variant_name,
-        sku: updates.sku !== undefined ? updates.sku : prev.sku,
-        barcode: updates.barcode !== undefined ? updates.barcode : prev.barcode,
-        buy_price: updates.buy_price !== undefined ? updates.buy_price : (updates.buyPrice !== undefined ? updates.buyPrice : prev.buy_price),
-        purchase_unit: updates.purchase_unit || updates.purchaseUnit || prev.purchase_unit,
-        sell_price: updates.sell_price !== undefined ? updates.sell_price : (updates.sellPrice !== undefined ? updates.sellPrice : prev.sell_price),
-        selling_unit: updates.selling_unit || updates.sellingUnit || prev.selling_unit,
-        conversion_factor: updates.conversion_factor !== undefined ? updates.conversion_factor : (updates.conversionFactor !== undefined ? updates.conversionFactor : prev.conversion_factor),
-        minimum_stock: updates.minimum_stock !== undefined ? updates.minimum_stock : (updates.minimumStock !== undefined ? updates.minimumStock : prev.minimum_stock),
-        supplier_id: updates.supplier_id !== undefined ? updates.supplier_id : (updates.supplierId !== undefined ? updates.supplierId : prev.supplier_id),
-        updated_at: new Date().toISOString(),
-      })
+      .update(variantUpdates)
       .eq('id', id)
       .select('*, product:products(*)')
       .single();
+
+    if (error && (error.message?.includes('min_sellable_qty') || error.message?.includes('unit_division') || error.code === 'PGRST204')) {
+      console.warn('[Supabase Schema] Column min_sellable_qty/unit_division not in schema cache during update. Retrying without fractional columns...');
+      const { unit_division, min_sellable_qty, ...fallbackUpdates } = variantUpdates;
+      const retryRes = await supabase
+        .from('product_variants')
+        .update(fallbackUpdates)
+        .eq('id', id)
+        .select('*, product:products(*)')
+        .single();
+      if (!retryRes.error && retryRes.data) {
+        updated = { ...retryRes.data, unit_division, min_sellable_qty };
+        error = null;
+      } else if (retryRes.error) {
+        error = retryRes.error;
+      }
+    }
 
     if (error) {
       throw new Error(`Khalad beddelka variant: ${error.message}`);
@@ -1033,6 +1079,8 @@ class ShopRepository {
       purchaseUnit: string;
       sellingUnit: string;
       conversionFactor: number;
+      unitDivision?: number;
+      minSellableQty?: number;
       buyPrice: number;
       sellPrice: number;
       supplierId?: string;
@@ -1042,6 +1090,11 @@ class ShopRepository {
     reason?: string
   ): Promise<any> {
     await this.checkAdminAuth('Alaab Soo Gashay (Incoming Stock)');
+
+    const division = Math.max(1, Number(data.unitDivision) || 1);
+    const minSellable = data.minSellableQty !== undefined && Number(data.minSellableQty) > 0
+      ? Number(data.minSellableQty)
+      : calculateMinSellableQty(division);
 
     // Search for existing product & variant
     const { data: existingProds } = await supabase
@@ -1064,17 +1117,28 @@ class ShopRepository {
       if (existingVars?.[0]) {
         variantId = existingVars[0].id;
         const currentVar = existingVars[0];
-        const addedQtyInSelling = data.quantity * data.conversionFactor;
+        const addedQtyInSelling = Number((data.quantity * data.conversionFactor).toFixed(4));
         const prevStock = Number(currentVar.stock_quantity);
-        const newStock = prevStock + addedQtyInSelling;
+        const newStock = Number((prevStock + addedQtyInSelling).toFixed(4));
 
-        await supabase.from('product_variants').update({
+        const updatePayload: any = {
           stock_quantity: newStock,
           buy_price: data.buyPrice,
           sell_price: data.sellPrice,
+          purchase_unit: data.purchaseUnit || currentVar.purchase_unit,
+          selling_unit: data.sellingUnit || currentVar.selling_unit,
+          conversion_factor: data.conversionFactor || currentVar.conversion_factor,
+          unit_division: division,
+          min_sellable_qty: minSellable,
           supplier_id: data.supplierId || currentVar.supplier_id,
           updated_at: new Date().toISOString(),
-        }).eq('id', variantId);
+        };
+
+        let { error: stockUpErr } = await supabase.from('product_variants').update(updatePayload).eq('id', variantId);
+        if (stockUpErr && (stockUpErr.message?.includes('min_sellable_qty') || stockUpErr.message?.includes('unit_division') || stockUpErr.code === 'PGRST204')) {
+          const { unit_division, min_sellable_qty, ...fallbackStockPayload } = updatePayload;
+          await supabase.from('product_variants').update(fallbackStockPayload).eq('id', variantId);
+        }
 
         await supabase.from('stock_movements').insert([{
           id: generateId(),
@@ -1104,7 +1168,9 @@ class ShopRepository {
         sell_price: data.sellPrice,
         selling_unit: data.sellingUnit,
         conversion_factor: data.conversionFactor,
-        stock_quantity: data.quantity * data.conversionFactor,
+        unit_division: division,
+        min_sellable_qty: minSellable,
+        stock_quantity: Number((data.quantity * data.conversionFactor).toFixed(4)),
         minimum_stock: data.minimumStock || 10,
         supplier_id: data.supplierId,
       },
@@ -1126,6 +1192,8 @@ class ShopRepository {
       sellPrice: number;
       sellingUnit: string;
       conversionFactor: number;
+      unitDivision?: number;
+      minSellableQty?: number;
       quantityToAdd?: number;
       minimumStock?: number;
       categoryId?: string;
@@ -1151,31 +1219,56 @@ class ShopRepository {
       }).eq('id', variant.product_id);
     }
 
-    const addedQty = Number(data.quantityToAdd || 0) * (Number(data.conversionFactor) || 1);
-    const prevStock = Number(variant.stock_quantity || 0);
-    const newStock = prevStock + addedQty;
+    const division = Math.max(1, Number(data.unitDivision) || Number(variant.unit_division) || 1);
+    const minSellable = data.minSellableQty !== undefined && Number(data.minSellableQty) > 0
+      ? Number(data.minSellableQty)
+      : calculateMinSellableQty(division);
 
-    const { data: updated, error } = await supabase
+    const addedQty = Number(((Number(data.quantityToAdd || 0)) * (Number(data.conversionFactor) || 1)).toFixed(4));
+    const prevStock = Number(variant.stock_quantity || 0);
+    const newStock = Number((prevStock + addedQty).toFixed(4));
+
+    const finalizePayload: any = {
+      variant_name: data.variantName.trim(),
+      sku: data.sku?.trim() || null,
+      barcode: data.barcode?.trim() || null,
+      buy_price: Number(data.buyPrice),
+      purchase_unit: data.purchaseUnit,
+      sell_price: Number(data.sellPrice),
+      selling_unit: data.sellingUnit,
+      conversion_factor: Number(data.conversionFactor) || 1,
+      unit_division: division,
+      min_sellable_qty: minSellable,
+      stock_quantity: newStock,
+      minimum_stock: Number(data.minimumStock || 10),
+      supplier_id: data.supplierId || null,
+      is_pending: false,
+      is_active: true,
+      updated_at: new Date().toISOString(),
+    };
+
+    let { data: updated, error } = await supabase
       .from('product_variants')
-      .update({
-        variant_name: data.variantName.trim(),
-        sku: data.sku?.trim() || null,
-        barcode: data.barcode?.trim() || null,
-        buy_price: Number(data.buyPrice),
-        purchase_unit: data.purchaseUnit,
-        sell_price: Number(data.sellPrice),
-        selling_unit: data.sellingUnit,
-        conversion_factor: Number(data.conversionFactor) || 1,
-        stock_quantity: newStock,
-        minimum_stock: Number(data.minimumStock || 10),
-        supplier_id: data.supplierId || null,
-        is_pending: false,
-        is_active: true,
-        updated_at: new Date().toISOString(),
-      })
+      .update(finalizePayload)
       .eq('id', variantId)
       .select('*, product:products(*)')
       .single();
+
+    if (error && (error.message?.includes('min_sellable_qty') || error.message?.includes('unit_division') || error.code === 'PGRST204')) {
+      const { unit_division, min_sellable_qty, ...fallbackFinalize } = finalizePayload;
+      const retryRes = await supabase
+        .from('product_variants')
+        .update(fallbackFinalize)
+        .eq('id', variantId)
+        .select('*, product:products(*)')
+        .single();
+      if (!retryRes.error && retryRes.data) {
+        updated = { ...retryRes.data, unit_division, min_sellable_qty };
+        error = null;
+      } else if (retryRes.error) {
+        error = retryRes.error;
+      }
+    }
 
     if (error) {
       throw new Error(`Khalad xaqiijinta alaabta: ${error.message}`);
@@ -1434,7 +1527,7 @@ class ShopRepository {
 
       const { data: curVar } = await supabase.from('product_variants').select('stock_quantity, selling_unit').eq('id', item.variant.id).single();
       const prevStock = Number(curVar?.stock_quantity || 0);
-      const newStock = Math.max(0, prevStock - item.quantity);
+      const newStock = Math.max(0, Number((prevStock - item.quantity).toFixed(4)));
 
       await supabase.from('product_variants').update({
         stock_quantity: newStock,

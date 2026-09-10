@@ -111,6 +111,8 @@ CREATE TABLE IF NOT EXISTS product_variants (
     sell_price NUMERIC(15, 4) NOT NULL DEFAULT 0.0000 CHECK (sell_price >= 0),
     selling_unit VARCHAR(50) NOT NULL DEFAULT 'kg',
     conversion_factor NUMERIC(15, 4) NOT NULL DEFAULT 1.0000 CHECK (conversion_factor > 0),
+    unit_division NUMERIC(15, 4) NOT NULL DEFAULT 1.0000 CHECK (unit_division > 0),
+    min_sellable_qty NUMERIC(15, 4) NOT NULL DEFAULT 1.0000 CHECK (min_sellable_qty > 0),
     stock_quantity NUMERIC(15, 4) NOT NULL DEFAULT 0.0000 CHECK (stock_quantity >= 0),
     minimum_stock NUMERIC(15, 4) NOT NULL DEFAULT 10.0000 CHECK (minimum_stock >= 0),
     supplier_id UUID REFERENCES suppliers(id) ON DELETE SET NULL,
@@ -1044,3 +1046,8 @@ BEGIN
     );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Safe column additions for existing installations
+ALTER TABLE IF EXISTS product_variants ADD COLUMN IF NOT EXISTS unit_division NUMERIC(15, 4) DEFAULT 1.0000;
+ALTER TABLE IF EXISTS product_variants ADD COLUMN IF NOT EXISTS min_sellable_qty NUMERIC(15, 4) DEFAULT 1.0000;
+

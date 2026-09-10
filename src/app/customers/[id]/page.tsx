@@ -24,7 +24,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
-import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogClose } from '@/components/ui/dialog';
+import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter, DialogClose } from '@/components/ui/dialog';
 import { useToast } from '@/components/ui/toast';
 import { repository } from '@/lib/services/repository';
 import { formatMoney } from '@/lib/calculations/financials';
@@ -422,7 +422,7 @@ export default function CustomerDetailPage() {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4 py-4">
+          <DialogBody className="space-y-4">
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
                 Cadadka Lacagta La Bixiyey ($) *
@@ -465,7 +465,7 @@ export default function CustomerDetailPage() {
                 onChange={(e) => setPaymentNotes(e.target.value)}
               />
             </div>
-          </div>
+          </DialogBody>
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsPaymentModalOpen(false)}>Ka Noqo</Button>
@@ -486,7 +486,7 @@ export default function CustomerDetailPage() {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4 py-4">
+          <DialogBody className="space-y-4">
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
                 Magaca Macmiilka *
@@ -537,7 +537,7 @@ export default function CustomerDetailPage() {
                 onChange={(e) => setEditReason(e.target.value)}
               />
             </div>
-          </div>
+          </DialogBody>
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsEditCustomerOpen(false)}>Ka Noqo</Button>
@@ -558,7 +558,7 @@ export default function CustomerDetailPage() {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4 py-4">
+          <DialogBody className="space-y-4">
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
                 Cadadka Saxda ah ($) *
@@ -611,7 +611,7 @@ export default function CustomerDetailPage() {
                 className="bg-white dark:bg-slate-900"
               />
             </div>
-          </div>
+          </DialogBody>
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setCorrectingPayment(null)}>Ka Noqo</Button>

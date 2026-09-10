@@ -34,7 +34,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
-import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogClose } from '@/components/ui/dialog';
+import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter, DialogClose } from '@/components/ui/dialog';
 import { useToast } from '@/components/ui/toast';
 import { repository } from '@/lib/services/repository';
 import { ShopSettings, SystemUser, UserRole, UserStatus, AuditLog } from '@/types';
@@ -822,7 +822,7 @@ export default function SettingsPage() {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2 text-xs">
+        <DialogBody className="space-y-4 text-xs">
           <div>
             <label className="font-bold text-slate-700 dark:text-slate-300">Magaca Buuxa *</label>
             <Input
@@ -866,7 +866,7 @@ export default function SettingsPage() {
               <option value="reporter">Reporter — Read-Only (Dashboard & Warbixinnada kaliya)</option>
             </select>
           </div>
-        </div>
+        </DialogBody>
 
         <DialogFooter className="flex gap-2">
           <Button variant="outline" onClick={() => setIsCreateUserOpen(false)}>
@@ -890,7 +890,7 @@ export default function SettingsPage() {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2 text-xs">
+        <DialogBody className="space-y-4 text-xs">
           <div>
             <label className="font-bold text-slate-700 dark:text-slate-300">Magaca</label>
             <Input
@@ -935,7 +935,7 @@ export default function SettingsPage() {
               </select>
             </div>
           </div>
-        </div>
+        </DialogBody>
 
         <DialogFooter className="flex gap-2">
           <Button variant="outline" onClick={() => setEditingUser(null)}>
@@ -959,7 +959,7 @@ export default function SettingsPage() {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2 text-xs">
+        <DialogBody className="space-y-4 text-xs">
           <div>
             <label className="font-bold text-slate-700 dark:text-slate-300">Furaha Sirta ah ee Cusub *</label>
             <Input
@@ -970,7 +970,7 @@ export default function SettingsPage() {
               className="mt-1 font-mono"
             />
           </div>
-        </div>
+        </DialogBody>
 
         <DialogFooter className="flex gap-2">
           <Button variant="outline" onClick={() => setResetPassUser(null)}>
@@ -995,7 +995,7 @@ export default function SettingsPage() {
         </DialogHeader>
 
         {selectedAuditLog && (
-          <div className="space-y-4 py-2 text-xs">
+          <DialogBody className="space-y-4 text-xs">
             <div className="grid grid-cols-2 gap-3 bg-slate-50 dark:bg-slate-800/50 p-3 rounded-xl border border-slate-200 dark:border-slate-800">
               <div>
                 <p className="text-slate-400 font-bold uppercase text-[10px]">User & Doorka</p>
@@ -1033,7 +1033,7 @@ export default function SettingsPage() {
                 </pre>
               </div>
             </div>
-          </div>
+          </DialogBody>
         )}
 
         <DialogFooter>

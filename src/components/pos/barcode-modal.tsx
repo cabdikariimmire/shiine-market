@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Camera, X, RefreshCw, AlertCircle, Barcode, CheckCircle2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogClose } from '@/components/ui/dialog';
+import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter, DialogClose } from '@/components/ui/dialog';
 
 interface BarcodeScannerModalProps {
   isOpen: boolean;
@@ -117,7 +117,7 @@ export function BarcodeScannerModal({ isOpen, onClose, onScan }: BarcodeScannerM
         </DialogDescription>
       </DialogHeader>
 
-      <div className="space-y-4 py-3">
+      <DialogBody className="space-y-4 py-3">
         {/* Video Scanner Box */}
         <div className="relative aspect-video w-full overflow-hidden rounded-2xl bg-black border border-slate-800 flex items-center justify-center">
           <video
@@ -165,7 +165,7 @@ export function BarcodeScannerModal({ isOpen, onClose, onScan }: BarcodeScannerM
             <Button type="submit" className="font-bold">Ku dar</Button>
           </div>
         </form>
-      </div>
+      </DialogBody>
 
       <DialogFooter>
         <Button variant="outline" onClick={onClose}>Xidh</Button>

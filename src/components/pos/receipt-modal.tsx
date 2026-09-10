@@ -3,7 +3,7 @@
 import React from 'react';
 import { Printer, CheckCircle2, Store, Phone, Calendar, User, CreditCard } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogHeader, DialogTitle, DialogFooter, DialogClose } from '@/components/ui/dialog';
+import { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter, DialogClose } from '@/components/ui/dialog';
 import { Sale } from '@/types';
 import { formatMoney } from '@/lib/calculations/financials';
 import { formatDate } from '@/lib/utils';
@@ -30,7 +30,7 @@ export function ReceiptModal({ isOpen, onClose, sale }: ReceiptModalProps) {
         </DialogTitle>
       </DialogHeader>
 
-      <div className="py-2 overflow-y-auto max-h-[60vh]">
+      <DialogBody className="py-2">
         {/* Printable Thermal Receipt Card */}
         <div id="printable-receipt" className="bg-white text-slate-900 p-6 rounded-xl border border-slate-200 shadow-inner font-mono text-xs space-y-4 max-w-sm mx-auto">
           {/* Shop Header */}
@@ -121,7 +121,7 @@ export function ReceiptModal({ isOpen, onClose, sale }: ReceiptModalProps) {
             <p className="font-sans">Alaabta la iibiyey dib looma celin karo 48 saac kadib.</p>
           </div>
         </div>
-      </div>
+      </DialogBody>
 
       <DialogFooter className="flex gap-2">
         <Button variant="outline" onClick={onClose} className="flex-1 font-bold">

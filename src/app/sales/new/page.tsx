@@ -32,7 +32,12 @@ import { ReceiptModal } from '@/components/pos/receipt-modal';
 import { useToast } from '@/components/ui/toast';
 import { repository } from '@/lib/services/repository';
 import { calculateCartItemLine, calculateSaleTotal, formatMoney } from '@/lib/calculations/financials';
-import { calculateCostPerBaseUnit, calculateUnitProfit } from '@/lib/calculations/stock';
+import { 
+  calculateCostPerBaseUnit, 
+  calculateUnitProfit, 
+  calculateMinSellableQty, 
+  isValidSellableQuantity 
+} from '@/lib/calculations/stock';
 import { CartItem, Category, Customer, PaymentMethod, ProductVariant, Sale } from '@/types';
 
 export default function POSTerminalPage() {
@@ -102,19 +107,36 @@ export default function POSTerminalPage() {
     }
   }, [paymentMethod, totals.totalAmount]);
 
-  // Add Variant to Cart with Strict Stock Validation
-  const addToCart = (variant: ProductVariant, addQuantity: number = 1) => {
+  // Add Variant to Cart with Fractional & Minimum Sellable Quantity Validation
+  const addToCart = (variant: ProductVariant, customAddQty?: number) => {
+    const step = variant.min_sellable_qty || (variant.unit_division ? calculateMinSellableQty(variant.unit_division) : 1);
+
     if (variant.stock_quantity <= 0) {
       error(`Lama iibin karo — "${variant.product?.name} (${variant.variant_name})" way dhammaatay (🔴 Out of Stock)!`);
       return;
     }
 
+    if (variant.stock_quantity < step) {
+      error(`Lama iibin karo — Kaydka haray (${variant.stock_quantity} ${variant.selling_unit}) wuxuu ka yar yahay qiyaasta ugu yar ee la iibin karo (${step} ${variant.selling_unit}).`);
+      return;
+    }
+
+    const defaultAdd = customAddQty !== undefined 
+      ? customAddQty 
+      : (variant.stock_quantity < 1 ? step : (step <= 0.25 ? 1 : step));
+
     const existingIndex = cart.findIndex(item => item.variant.id === variant.id);
     const existingQty = existingIndex !== -1 ? cart[existingIndex].quantity : 0;
-    const targetQty = Math.round((existingQty + addQuantity) * 100) / 100;
+    const targetQty = Number((existingQty + defaultAdd).toFixed(4));
 
     if (targetQty > variant.stock_quantity) {
       error(`Stock-ku kuma filna "${variant.product?.name} (${variant.variant_name})". Waxaa haray kaliya ${variant.stock_quantity} ${variant.selling_unit}.`);
+      return;
+    }
+
+    const validation = isValidSellableQuantity(targetQty, step, variant.selling_unit);
+    if (!validation.valid) {
+      error(validation.reason || 'Tirada ma aha qeyb sax ah');
       return;
     }
 
@@ -134,13 +156,13 @@ export default function POSTerminalPage() {
         };
         return updated;
       } else {
-        const line = calculateCartItemLine(variant.sell_price, costPerBase, addQuantity, 0);
+        const line = calculateCartItemLine(variant.sell_price, costPerBase, defaultAdd, 0);
         return [
           ...prev,
           {
             product: variant.product || { id: variant.product_id, name: 'Alaab', created_at: '', updated_at: '' },
             variant,
-            quantity: addQuantity,
+            quantity: defaultAdd,
             unitPrice: variant.sell_price,
             unitCost: costPerBase,
             discount: 0,
@@ -151,39 +173,47 @@ export default function POSTerminalPage() {
       }
     });
 
-    info(`Ku daray dambiisha: ${variant.product?.name} (${variant.variant_name})`);
+    info(`Ku daray dambiisha: ${variant.product?.name} (${variant.variant_name}) +${defaultAdd} ${variant.selling_unit}`);
   };
 
-  // Update Cart Quantity with Strict Stock Cap
-  const updateCartQty = (variantId: string, newQty: number) => {
-    const safeQty = Math.max(0, Math.round(newQty * 100) / 100);
-
+  // Update Cart Quantity with Strict Stock Cap & Division Validation
+  const updateCartQty = (variantId: string, newQty: number, enforceValidation: boolean = false) => {
     const item = cart.find(i => i.variant.id === variantId);
     if (!item) return;
+
+    const step = item.variant.min_sellable_qty || (item.variant.unit_division ? calculateMinSellableQty(item.variant.unit_division) : 1);
+    const safeQty = Math.max(0, Number(newQty.toFixed(4)));
+
+    if (safeQty === 0) {
+      setCart(prev => prev.filter(i => i.variant.id !== variantId));
+      return;
+    }
 
     if (safeQty > item.variant.stock_quantity) {
       error(`Stock-ku kuma filna. Waxaa haray kaliya ${item.variant.stock_quantity} ${item.variant.selling_unit}.`);
       return;
     }
 
-    setCart(prev => {
-      if (safeQty === 0) {
-        return prev.filter(i => i.variant.id !== variantId);
+    if (enforceValidation) {
+      const val = isValidSellableQuantity(safeQty, step, item.variant.selling_unit);
+      if (!val.valid) {
+        error(val.reason || 'Tirada ma aha qeyb sax ah');
+        return;
       }
+    }
 
-      return prev.map(i => {
-        if (i.variant.id === variantId) {
-          const line = calculateCartItemLine(i.unitPrice, i.unitCost, safeQty, i.discount);
-          return {
-            ...i,
-            quantity: safeQty,
-            totalPrice: line.totalPrice,
-            grossProfit: line.grossProfit,
-          };
-        }
-        return i;
-      });
-    });
+    setCart(prev => prev.map(i => {
+      if (i.variant.id === variantId) {
+        const line = calculateCartItemLine(i.unitPrice, i.unitCost, safeQty, i.discount);
+        return {
+          ...i,
+          quantity: safeQty,
+          totalPrice: line.totalPrice,
+          grossProfit: line.grossProfit,
+        };
+      }
+      return i;
+    }));
   };
 
   // Update Cart Line Price or Discount
@@ -214,11 +244,25 @@ export default function POSTerminalPage() {
     setNotes('');
   };
 
-  // Execute Sale Checkout
+  // Execute Sale Checkout with Full Validation
   const handleCheckout = async () => {
     if (cart.length === 0) {
       error('Dambiisha waxba kuma jiraan!');
       return;
+    }
+
+    // Strict validation of fractional units and remaining stock before submission
+    for (const item of cart) {
+      const step = item.variant.min_sellable_qty || (item.variant.unit_division ? calculateMinSellableQty(item.variant.unit_division) : 1);
+      const val = isValidSellableQuantity(item.quantity, step, item.variant.selling_unit);
+      if (!val.valid) {
+        error(`Qalad tirada: "${item.product.name}" (${item.variant.variant_name}): ${val.reason}`);
+        return;
+      }
+      if (item.quantity > item.variant.stock_quantity) {
+        error(`Stock-ku kuma filna "${item.product.name} (${item.variant.variant_name})". Waxaa haray kaliya ${item.variant.stock_quantity} ${item.variant.selling_unit}.`);
+        return;
+      }
     }
 
     if (paymentMethod === 'credit' || paymentMethod === 'partial') {
@@ -323,6 +367,7 @@ export default function POSTerminalPage() {
                 const costPerBase = calculateCostPerBaseUnit(v.buy_price, v.conversion_factor);
                 const profit = calculateUnitProfit(v.sell_price, costPerBase);
                 const isOutOfStock = v.stock_quantity <= 0;
+                const minSellable = v.min_sellable_qty || (v.unit_division ? calculateMinSellableQty(v.unit_division) : 1);
 
                 return (
                   <button
@@ -332,7 +377,7 @@ export default function POSTerminalPage() {
                         error(`Lama iibin karo — alaabta "${v.product?.name} (${v.variant_name})" way dhammaatay (🔴 Out of Stock).`);
                         return;
                       }
-                      addToCart(v, 1);
+                      addToCart(v);
                     }}
                     className={`group flex flex-col justify-between text-left p-3.5 rounded-2xl border transition-all relative overflow-hidden ${
                       isOutOfStock
@@ -354,16 +399,20 @@ export default function POSTerminalPage() {
                         </span>
                       </div>
 
-                      <div className="flex items-center justify-between mt-1">
-                        <p className="text-[11px] text-slate-400">
+                      <div className="flex items-center justify-between mt-1 text-[11px]">
+                        <span className="text-slate-400">
+                          Unit: <strong className="text-slate-700 dark:text-slate-300 uppercase">{v.selling_unit}</strong>
+                        </span>
+                        <span className="text-slate-400">
                           Kaydka: <strong className={`font-mono ${isOutOfStock ? 'text-red-600 dark:text-red-400 font-black' : 'text-slate-700 dark:text-slate-300'}`}>{v.stock_quantity} {v.selling_unit}</strong>
-                        </p>
-                        {isOutOfStock && (
-                          <span className="text-[9px] font-bold text-red-600 bg-red-50 dark:bg-red-950/50 px-1.5 py-0.5 rounded border border-red-200 dark:border-red-900">
-                            Dhammaatay
-                          </span>
-                        )}
+                        </span>
                       </div>
+
+                      {v.unit_division && v.unit_division > 1 && (
+                        <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-mono font-semibold mt-0.5">
+                          Min: {minSellable} {v.selling_unit}
+                        </p>
+                      )}
                     </div>
 
                     <div className="mt-3 pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
@@ -418,78 +467,124 @@ export default function POSTerminalPage() {
                 Dambiishu waa maran tahay. Taabo alaabta bidixda ku taal.
               </div>
             ) : (
-              cart.map((item) => (
-                <div
-                  key={item.variant.id}
-                  className="p-3 bg-slate-50 dark:bg-slate-800/40 rounded-xl border border-slate-200/60 dark:border-slate-800 space-y-2"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <p className="font-bold text-slate-900 dark:text-white text-xs">
-                        {item.product.name} <span className="text-emerald-600">({item.variant.variant_name})</span>
-                      </p>
-                      <p className="text-[10px] text-slate-400 font-mono">
-                        {formatMoney(item.unitPrice)}/{item.variant.selling_unit} | Faa'iido: +{formatMoney(item.grossProfit)}
-                      </p>
-                    </div>
+              cart.map((item) => {
+                const step = item.variant.min_sellable_qty || (item.variant.unit_division ? calculateMinSellableQty(item.variant.unit_division) : 1);
 
-                    <button
-                      onClick={() => removeFromCart(item.variant.id)}
-                      className="text-slate-400 hover:text-red-600 p-1"
-                      title="Ka saar"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-
-                  {/* Decimal Quantity Controls */}
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => updateCartQty(item.variant.id, item.quantity - 1)}
-                        className="h-7 w-7 flex items-center justify-center rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold"
-                      >
-                        -1
-                      </button>
-
-                      <Input
-                        type="number"
-                        step="0.05"
-                        value={item.quantity}
-                        onChange={(e) => updateCartQty(item.variant.id, Number(e.target.value))}
-                        className="h-7 w-18 text-center font-mono font-bold text-xs p-1 bg-white dark:bg-slate-900"
-                      />
+                return (
+                  <div
+                    key={item.variant.id}
+                    className="p-3 bg-slate-50 dark:bg-slate-800/40 rounded-xl border border-slate-200/60 dark:border-slate-800 space-y-2"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="font-bold text-slate-900 dark:text-white text-xs">
+                          {item.product.name} <span className="text-emerald-600">({item.variant.variant_name})</span>
+                        </p>
+                        <p className="text-[10px] text-slate-400 font-mono">
+                          {formatMoney(item.unitPrice)}/{item.variant.selling_unit} | Faa'iido: +{formatMoney(item.grossProfit)}
+                        </p>
+                      </div>
 
                       <button
-                        onClick={() => updateCartQty(item.variant.id, item.quantity + 1)}
-                        className="h-7 w-7 flex items-center justify-center rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold"
+                        onClick={() => removeFromCart(item.variant.id)}
+                        className="text-slate-400 hover:text-red-600 p-1"
+                        title="Ka saar"
                       >
-                        +1
-                      </button>
-
-                      {/* Bulk Quick Fractions (+0.25, +0.5 kg) */}
-                      <button
-                        onClick={() => updateCartQty(item.variant.id, item.quantity + 0.25)}
-                        className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300"
-                        title="Ku dar 0.25"
-                      >
-                        +0.25
-                      </button>
-                      <button
-                        onClick={() => updateCartQty(item.variant.id, item.quantity + 0.5)}
-                        className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300"
-                        title="Ku dar 0.5"
-                      >
-                        +0.5
+                        <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     </div>
 
-                    <span className="font-mono font-black text-slate-900 dark:text-white text-sm">
-                      {formatMoney(item.totalPrice)}
-                    </span>
+                    {/* Decimal Quantity Controls */}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => updateCartQty(item.variant.id, Math.max(0, Number((item.quantity - step).toFixed(4))), true)}
+                          className="h-7 px-1.5 min-w-[28px] flex items-center justify-center rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs"
+                          title={`Jar ${step} ${item.variant.selling_unit}`}
+                        >
+                          -{step}
+                        </button>
+
+                        <Input
+                          type="number"
+                          step={step}
+                          min={step}
+                          value={item.quantity}
+                          onChange={(e) => updateCartQty(item.variant.id, parseFloat(e.target.value) || 0, false)}
+                          onBlur={(e) => updateCartQty(item.variant.id, parseFloat(e.target.value) || step, true)}
+                          className="h-7 w-20 text-center font-mono font-bold text-xs p-1 bg-white dark:bg-slate-900"
+                        />
+
+                        <button
+                          type="button"
+                          onClick={() => updateCartQty(item.variant.id, Number((item.quantity + step).toFixed(4)), true)}
+                          className="h-7 px-1.5 min-w-[28px] flex items-center justify-center rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs"
+                          title={`Ku dar ${step} ${item.variant.selling_unit}`}
+                        >
+                          +{step}
+                        </button>
+
+                        {/* Fractional Quick Steps */}
+                        {step < 1 ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => updateCartQty(item.variant.id, Number((item.quantity + step).toFixed(4)), true)}
+                              className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300"
+                              title={`Ku dar ${step} ${item.variant.selling_unit}`}
+                            >
+                              +{step}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => updateCartQty(item.variant.id, Number((item.quantity + Number((step * 2).toFixed(4))).toFixed(4)), true)}
+                              className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300"
+                              title={`Ku dar ${Number((step * 2).toFixed(4))} ${item.variant.selling_unit}`}
+                            >
+                              +{Number((step * 2).toFixed(4))}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => updateCartQty(item.variant.id, Number((item.quantity + 1).toFixed(4)), true)}
+                              className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300"
+                              title={`Ku dar 1 ${item.variant.selling_unit}`}
+                            >
+                              +1
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => updateCartQty(item.variant.id, Number((item.quantity + 1).toFixed(4)), true)}
+                              className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300"
+                              title={`Ku dar 1 ${item.variant.selling_unit}`}
+                            >
+                              +1
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => updateCartQty(item.variant.id, Number((item.quantity + 5).toFixed(4)), true)}
+                              className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300"
+                              title={`Ku dar 5 ${item.variant.selling_unit}`}
+                            >
+                              +5
+                            </button>
+                          </>
+                        )}
+                        <span className="text-[10px] text-slate-500 font-mono font-bold uppercase ml-0.5">
+                          {item.variant.selling_unit}
+                        </span>
+                      </div>
+
+                      <span className="font-mono font-black text-slate-900 dark:text-white text-sm">
+                        {formatMoney(item.totalPrice)}
+                      </span>
+                    </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
 

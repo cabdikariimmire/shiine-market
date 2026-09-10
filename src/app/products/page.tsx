@@ -32,11 +32,18 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
-import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogClose } from '@/components/ui/dialog';
+import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter, DialogClose } from '@/components/ui/dialog';
 import { useToast } from '@/components/ui/toast';
 import { repository } from '@/lib/services/repository';
 import { formatMoney } from '@/lib/calculations/financials';
-import { calculateCostPerBaseUnit, calculateUnitProfit, getStockStatus } from '@/lib/calculations/stock';
+import { 
+  calculateCostPerBaseUnit, 
+  calculateUnitProfit, 
+  getStockStatus,
+  calculateMinSellableQty,
+  ALLOWED_INCOMING_UNITS,
+  ALLOWED_SELLING_UNITS 
+} from '@/lib/calculations/stock';
 import { Category, ProductVariant, StockMovement, Supplier } from '@/types';
 import { useAuth } from '@/lib/auth/auth-context';
 
@@ -71,6 +78,7 @@ export default function ProductsPage() {
   const [stockInPUnit, setStockInPUnit] = useState('jawan');
   const [stockInSUnit, setStockInSUnit] = useState('kg');
   const [stockInConv, setStockInConv] = useState<string>('');
+  const [stockInDivision, setStockInDivision] = useState<string>('1');
   const [stockInBuy, setStockInBuy] = useState<string>('');
   const [stockInSell, setStockInSell] = useState<string>('');
   const [stockInSupplier, setStockInSupplier] = useState('');
@@ -88,6 +96,7 @@ export default function ProductsPage() {
   const [editSellPrice, setEditSellPrice] = useState<string>('');
   const [editSellingUnit, setEditSellingUnit] = useState('kg');
   const [editConversion, setEditConversion] = useState<string>('');
+  const [editDivision, setEditDivision] = useState<string>('1');
   const [editMinStock, setEditMinStock] = useState<string>('');
   const [editCategoryId, setEditCategoryId] = useState('');
   const [editSupplierId, setEditSupplierId] = useState('');
@@ -134,10 +143,11 @@ export default function ProductsPage() {
     setEditSku(v.sku || '');
     setEditBarcode(v.barcode || '');
     setEditBuyPrice(String(v.buy_price ?? 0));
-    setEditPurchaseUnit(v.purchase_unit);
+    setEditPurchaseUnit(v.purchase_unit || 'jawan');
     setEditSellPrice(String(v.sell_price ?? 0));
-    setEditSellingUnit(v.selling_unit);
+    setEditSellingUnit(v.selling_unit || 'kg');
     setEditConversion(String(v.conversion_factor || 1));
+    setEditDivision(String(v.unit_division || 1));
     setEditMinStock(String(v.minimum_stock ?? 0));
     setEditCategoryId(v.product?.category_id || '');
     setEditSupplierId(v.supplier_id || '');
@@ -157,6 +167,8 @@ export default function ProductsPage() {
     const buyPrice = parseFloat(editBuyPrice) || 0;
     const sellPrice = parseFloat(editSellPrice) || 0;
     const conversion = parseFloat(editConversion) || 1;
+    const division = Math.max(1, parseFloat(editDivision) || 1);
+    const minSellable = calculateMinSellableQty(division);
     const minStock = parseFloat(editMinStock) || 0;
     const incomingQty = parseFloat(editIncomingQty) || 0;
 
@@ -170,6 +182,8 @@ export default function ProductsPage() {
           sellPrice: sellPrice,
           sellingUnit: editSellingUnit,
           conversionFactor: conversion,
+          unitDivision: division,
+          minSellableQty: minSellable,
           quantityToAdd: incomingQty,
           categoryId: editCategoryId,
           minimumStock: minStock,
@@ -188,6 +202,8 @@ export default function ProductsPage() {
           sell_price: sellPrice,
           selling_unit: editSellingUnit,
           conversion_factor: conversion,
+          unit_division: division,
+          min_sellable_qty: minSellable,
           minimum_stock: minStock,
           supplier_id: editSupplierId,
         }, editReason.trim() || `Wax ka beddel alaabta: ${editProductName} (${editVariantName})`);
@@ -255,6 +271,8 @@ export default function ProductsPage() {
   const handleSaveStockIn = async () => {
     const qty = parseFloat(stockInQty);
     const conv = parseFloat(stockInConv) || 1;
+    const division = Math.max(1, parseFloat(stockInDivision) || 1);
+    const minSellable = calculateMinSellableQty(division);
     const buy = parseFloat(stockInBuy) || 0;
     const sell = parseFloat(stockInSell);
     const min = parseFloat(stockInMin) || 0;
@@ -280,6 +298,8 @@ export default function ProductsPage() {
         purchaseUnit: stockInPUnit,
         sellingUnit: stockInSUnit,
         conversionFactor: conv,
+        unitDivision: division,
+        minSellableQty: minSellable,
         buyPrice: buy,
         sellPrice: sell,
         supplierId: stockInSupplier || undefined,
@@ -293,6 +313,7 @@ export default function ProductsPage() {
       setStockInVariant('');
       setStockInQty('');
       setStockInConv('');
+      setStockInDivision('1');
       setStockInBuy('');
       setStockInSell('');
       setStockInMin('');
@@ -554,6 +575,11 @@ export default function ProductsPage() {
                               ≈ {(v.stock_quantity / v.conversion_factor).toFixed(1)} {v.purchase_unit}
                             </p>
                           )}
+                          {v.unit_division && v.unit_division > 1 && (
+                            <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-mono font-bold">
+                              Min: {v.min_sellable_qty || (1 / v.unit_division)} {v.selling_unit}
+                            </p>
+                          )}
                         </td>
 
                         {/* Actions Menu */}
@@ -718,7 +744,7 @@ export default function ProductsPage() {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2 text-xs">
+        <DialogBody className="space-y-4 text-xs">
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="font-bold text-slate-700 dark:text-slate-300">Magaca Alaabta *</label>
@@ -753,13 +779,19 @@ export default function ProductsPage() {
               />
             </div>
             <div>
-              <label className="font-bold text-slate-700 dark:text-slate-300">Halbeegga Soo Galka</label>
-              <Input
-                placeholder="jawan, carton..."
+              <label className="font-bold text-slate-700 dark:text-slate-300">Halbeegga Soo Galka *</label>
+              <select
                 value={stockInPUnit}
                 onChange={(e) => setStockInPUnit(e.target.value)}
-                className="mt-1"
-              />
+                className="mt-1 flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-xs font-bold"
+              >
+                {ALLOWED_INCOMING_UNITS.map(u => (
+                  <option key={u.value} value={u.value}>{u.label}</option>
+                ))}
+                {!ALLOWED_INCOMING_UNITS.some(u => u.value === stockInPUnit) && (
+                  <option value={stockInPUnit}>{stockInPUnit}</option>
+                )}
+              </select>
             </div>
             <div>
               <label className="font-bold text-slate-700 dark:text-slate-300">Qiimaha Soo Iibka ($)</label>
@@ -774,35 +806,71 @@ export default function ProductsPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-3 bg-slate-50 dark:bg-slate-800/40 p-3 rounded-xl border border-slate-200 dark:border-slate-800">
-            <div>
-              <label className="font-medium text-slate-600 dark:text-slate-400">1 {stockInPUnit} =</label>
-              <Input
-                type="number"
-                placeholder="50"
-                value={stockInConv}
-                onChange={(e) => setStockInConv(e.target.value)}
-                className="mt-1 font-mono font-bold"
-              />
+          <div className="bg-slate-50 dark:bg-slate-800/40 p-3 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className="font-medium text-slate-600 dark:text-slate-400">1 {stockInPUnit.toUpperCase()} =</label>
+                <Input
+                  type="number"
+                  placeholder="50"
+                  value={stockInConv}
+                  onChange={(e) => setStockInConv(e.target.value)}
+                  className="mt-1 font-mono font-bold"
+                />
+              </div>
+              <div>
+                <label className="font-medium text-slate-600 dark:text-slate-400">Halbeegga Iibka *</label>
+                <select
+                  value={stockInSUnit}
+                  onChange={(e) => setStockInSUnit(e.target.value)}
+                  className="mt-1 flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-xs font-bold"
+                >
+                  {ALLOWED_SELLING_UNITS.map(u => (
+                    <option key={u.value} value={u.value}>{u.label}</option>
+                  ))}
+                  {!ALLOWED_SELLING_UNITS.some(u => u.value === stockInSUnit) && (
+                    <option value={stockInSUnit}>{stockInSUnit}</option>
+                  )}
+                </select>
+              </div>
+              <div>
+                <label className="font-medium text-slate-600 dark:text-slate-400">Qiimaha Iibinta ($/{stockInSUnit.toUpperCase()}) *</label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  placeholder=""
+                  value={stockInSell}
+                  onChange={(e) => setStockInSell(e.target.value)}
+                  className="mt-1 font-mono font-bold text-emerald-700"
+                />
+              </div>
             </div>
-            <div>
-              <label className="font-medium text-slate-600 dark:text-slate-400">Halbeegga Iibka</label>
-              <Input
-                value={stockInSUnit}
-                onChange={(e) => setStockInSUnit(e.target.value)}
-                className="mt-1"
-              />
-            </div>
-            <div>
-              <label className="font-medium text-slate-600 dark:text-slate-400">Qiimaha Iibinta ($/{stockInSUnit}) *</label>
-              <Input
-                type="number"
-                step="0.01"
-                placeholder=""
-                value={stockInSell}
-                onChange={(e) => setStockInSell(e.target.value)}
-                className="mt-1 font-mono font-bold text-emerald-700"
-              />
+
+            {/* Fractional division & Minimum sellable quantity */}
+            <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60 grid grid-cols-2 gap-3 items-center">
+              <div>
+                <label className="font-medium text-slate-600 dark:text-slate-400">
+                  1 {stockInSUnit.toUpperCase()} waxaa loo qaybin karaa:
+                </label>
+                <div className="flex items-center gap-1.5 mt-1">
+                  <Input
+                    type="number"
+                    min="1"
+                    step="1"
+                    placeholder="1, 4, 10..."
+                    value={stockInDivision}
+                    onChange={(e) => setStockInDivision(e.target.value)}
+                    className="font-mono font-bold w-24 h-8 text-xs"
+                  />
+                  <span className="text-[11px] text-slate-500">qeybood</span>
+                </div>
+              </div>
+              <div className="bg-emerald-50 dark:bg-emerald-950/40 p-2 rounded-lg border border-emerald-200 dark:border-emerald-800/60">
+                <p className="text-[10px] uppercase font-bold text-emerald-800 dark:text-emerald-300">Qiyaasta ugu yar ee la iibin karo (Min Qty):</p>
+                <p className="text-xs font-black font-mono text-emerald-700 dark:text-emerald-300 mt-0.5">
+                  Minimum: {calculateMinSellableQty(parseFloat(stockInDivision) || 1)} {stockInSUnit.toUpperCase()}
+                </p>
+              </div>
             </div>
           </div>
 
@@ -834,7 +902,7 @@ export default function ProductsPage() {
               </select>
             </div>
           </div>
-        </div>
+        </DialogBody>
 
         <DialogFooter className="flex gap-2">
           <Button variant="outline" onClick={() => setIsStockInOpen(false)}>
@@ -860,7 +928,7 @@ export default function ProductsPage() {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2 text-xs">
+        <DialogBody className="space-y-4 text-xs">
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="font-bold text-slate-700 dark:text-slate-300">Magaca Alaabta *</label>
@@ -911,15 +979,22 @@ export default function ProductsPage() {
               />
             </div>
             <div>
-              <label className="font-bold text-slate-700 dark:text-slate-300">Halbeegga Soo Iibka</label>
-              <Input
+              <label className="font-bold text-slate-700 dark:text-slate-300">Halbeegga Soo Galka *</label>
+              <select
                 value={editPurchaseUnit}
                 onChange={(e) => setEditPurchaseUnit(e.target.value)}
-                className="mt-1"
-              />
+                className="mt-1 flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-xs font-bold"
+              >
+                {ALLOWED_INCOMING_UNITS.map(u => (
+                  <option key={u.value} value={u.value}>{u.label}</option>
+                ))}
+                {!ALLOWED_INCOMING_UNITS.some(u => u.value === editPurchaseUnit) && (
+                  <option value={editPurchaseUnit}>{editPurchaseUnit}</option>
+                )}
+              </select>
             </div>
             <div>
-              <label className="font-bold text-slate-700 dark:text-slate-300">Qiimaha Iibinta ($/{editSellingUnit}) *</label>
+              <label className="font-bold text-slate-700 dark:text-slate-300">Qiimaha Iibinta ($/{editSellingUnit.toUpperCase()}) *</label>
               <Input
                 type="number"
                 step="0.01"
@@ -930,32 +1005,68 @@ export default function ProductsPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-3 bg-slate-50 dark:bg-slate-800/40 p-3 rounded-xl border border-slate-200 dark:border-slate-800">
-            <div>
-              <label className="font-medium text-slate-600 dark:text-slate-400">1 {editPurchaseUnit} =</label>
-              <Input
-                type="number"
-                value={editConversion}
-                onChange={(e) => setEditConversion(e.target.value)}
-                className="mt-1 font-mono"
-              />
+          <div className="bg-slate-50 dark:bg-slate-800/40 p-3 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className="font-medium text-slate-600 dark:text-slate-400">1 {editPurchaseUnit.toUpperCase()} =</label>
+                <Input
+                  type="number"
+                  value={editConversion}
+                  onChange={(e) => setEditConversion(e.target.value)}
+                  className="mt-1 font-mono"
+                />
+              </div>
+              <div>
+                <label className="font-medium text-slate-600 dark:text-slate-400">Halbeegga Iibka *</label>
+                <select
+                  value={editSellingUnit}
+                  onChange={(e) => setEditSellingUnit(e.target.value)}
+                  className="mt-1 flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-xs font-bold"
+                >
+                  {ALLOWED_SELLING_UNITS.map(u => (
+                    <option key={u.value} value={u.value}>{u.label}</option>
+                  ))}
+                  {!ALLOWED_SELLING_UNITS.some(u => u.value === editSellingUnit) && (
+                    <option value={editSellingUnit}>{editSellingUnit}</option>
+                  )}
+                </select>
+              </div>
+              <div>
+                <label className="font-medium text-slate-600 dark:text-slate-400">Heerka Digniinta (Min Stock)</label>
+                <Input
+                  type="number"
+                  value={editMinStock}
+                  onChange={(e) => setEditMinStock(e.target.value)}
+                  className="mt-1 font-mono"
+                />
+              </div>
             </div>
-            <div>
-              <label className="font-medium text-slate-600 dark:text-slate-400">Halbeegga Iibka</label>
-              <Input
-                value={editSellingUnit}
-                onChange={(e) => setEditSellingUnit(e.target.value)}
-                className="mt-1"
-              />
-            </div>
-            <div>
-              <label className="font-medium text-slate-600 dark:text-slate-400">Heerka Digniinta (Min Stock)</label>
-              <Input
-                type="number"
-                value={editMinStock}
-                onChange={(e) => setEditMinStock(e.target.value)}
-                className="mt-1 font-mono"
-              />
+
+            {/* Fractional division & Minimum sellable quantity in Edit Modal */}
+            <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60 grid grid-cols-2 gap-3 items-center">
+              <div>
+                <label className="font-medium text-slate-600 dark:text-slate-400">
+                  1 {editSellingUnit.toUpperCase()} waxaa loo qaybin karaa:
+                </label>
+                <div className="flex items-center gap-1.5 mt-1">
+                  <Input
+                    type="number"
+                    min="1"
+                    step="1"
+                    placeholder="1, 4, 10..."
+                    value={editDivision}
+                    onChange={(e) => setEditDivision(e.target.value)}
+                    className="font-mono font-bold w-24 h-8 text-xs"
+                  />
+                  <span className="text-[11px] text-slate-500">qeybood</span>
+                </div>
+              </div>
+              <div className="bg-emerald-50 dark:bg-emerald-950/40 p-2 rounded-lg border border-emerald-200 dark:border-emerald-800/60">
+                <p className="text-[10px] uppercase font-bold text-emerald-800 dark:text-emerald-300">Qiyaasta ugu yar ee la iibin karo (Min Qty):</p>
+                <p className="text-xs font-black font-mono text-emerald-700 dark:text-emerald-300 mt-0.5">
+                  Minimum: {calculateMinSellableQty(parseFloat(editDivision) || 1)} {editSellingUnit.toUpperCase()}
+                </p>
+              </div>
             </div>
           </div>
 
@@ -997,7 +1108,7 @@ export default function ProductsPage() {
               className="mt-1 text-slate-600"
             />
           </div>
-        </div>
+        </DialogBody>
 
         <DialogFooter className="flex gap-2">
           <Button variant="outline" onClick={() => setEditingVariant(null)}>
@@ -1021,7 +1132,7 @@ export default function ProductsPage() {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2 text-xs">
+        <DialogBody className="space-y-4 text-xs">
           {/* Item Summary Card */}
           <div className="bg-slate-50 dark:bg-slate-800/60 p-3 rounded-xl border border-slate-200/80 dark:border-slate-800 flex items-center justify-between">
             <div>
@@ -1113,7 +1224,7 @@ export default function ProductsPage() {
               className="mt-1"
             />
           </div>
-        </div>
+        </DialogBody>
 
         <DialogFooter className="flex gap-2">
           <Button variant="outline" onClick={() => setAdjustingVariant(null)}>
@@ -1137,7 +1248,7 @@ export default function ProductsPage() {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="max-h-96 overflow-y-auto space-y-2 py-2 text-xs">
+        <DialogBody className="space-y-2 text-xs">
           {movements.length === 0 ? (
             <p className="text-center text-slate-400 py-8">Dhaqdhaqaaq kayd hore uma dhicin</p>
           ) : (
@@ -1190,7 +1301,7 @@ export default function ProductsPage() {
               </table>
             </div>
           )}
-        </div>
+        </DialogBody>
 
         <DialogFooter>
           <Button variant="outline" onClick={() => setHistoryVariant(null)}>

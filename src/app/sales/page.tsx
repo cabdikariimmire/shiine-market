@@ -22,7 +22,7 @@ import { AppShell } from '@/components/layout/app-shell';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card } from '@/components/ui/card';
-import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogClose } from '@/components/ui/dialog';
+import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter, DialogClose } from '@/components/ui/dialog';
 import { ReceiptModal } from '@/components/pos/receipt-modal';
 import { useToast } from '@/components/ui/toast';
 import { repository } from '@/lib/services/repository';
@@ -417,7 +417,7 @@ export default function SalesHistoryPage() {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2 text-xs max-h-[70vh] overflow-y-auto pr-1">
+        <DialogBody className="space-y-4 text-xs">
           {/* Customer & Payment Method */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
@@ -574,7 +574,7 @@ export default function SalesHistoryPage() {
               className="mt-1 text-slate-600"
             />
           </div>
-        </div>
+        </DialogBody>
 
         <DialogFooter className="flex gap-2">
           <Button variant="outline" onClick={() => setEditingSale(null)}>
@@ -598,15 +598,17 @@ export default function SalesHistoryPage() {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="py-2 text-xs">
-          <label className="font-bold text-slate-700 dark:text-slate-300">Sababta loo laalay (Void Reason) *</label>
-          <Input
-            placeholder="Tusaale: Macmiilku wuxuu ka noqday iibka..."
-            value={voidReason}
-            onChange={(e) => setVoidReason(e.target.value)}
-            className="mt-1"
-          />
-        </div>
+        <DialogBody className="space-y-4 text-xs">
+          <div>
+            <label className="font-bold text-slate-700 dark:text-slate-300">Sababta loo laalay (Void Reason) *</label>
+            <Input
+              placeholder="Tusaale: Macmiilku wuxuu ka noqday iibka..."
+              value={voidReason}
+              onChange={(e) => setVoidReason(e.target.value)}
+              className="mt-1"
+            />
+          </div>
+        </DialogBody>
 
         <DialogFooter className="flex gap-2">
           <Button variant="outline" onClick={() => setVoidingSale(null)}>
