@@ -1,0 +1,203 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 40% 98%;
+    --foreground: 222.2 84% 4.9%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+
+    --primary: 158 84% 37%;
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 158 84% 37%;
+
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+
+    --card: 222.2 84% 6.9%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222.2 84% 6.9%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 158 75% 42%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 158 75% 42%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased font-sans;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* Custom modern scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.4);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.7);
+}
+
+/* ======================================================== */
+/* PRINT STYLES (A4 Reports & Thermal Receipts)             */
+/* ======================================================== */
+@media screen {
+  .print-only {
+    display: none !important;
+  }
+}
+
+@media print {
+  /* Hide screen chrome & controls */
+  nav,
+  aside,
+  header,
+  .no-print,
+  .screen-only,
+  .print\:hidden {
+    display: none !important;
+  }
+
+  /* Reset document root for natural vertical printing */
+  html, body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-size: 10pt !important;
+    line-height: 1.35 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Reset sidebar left padding on main containers */
+  .lg\:pl-72 {
+    padding-left: 0 !important;
+  }
+
+  main {
+    padding: 0 !important;
+    margin: 0 !important;
+    max-width: 100% !important;
+    width: 100% !important;
+  }
+
+  /* Display print-only containers */
+  .print-only {
+    display: block !important;
+    visibility: visible !important;
+    width: 100% !important;
+  }
+
+  /* Thermal Receipt Mode (80mm) */
+  #printable-receipt {
+    display: block !important;
+    visibility: visible !important;
+    width: 80mm !important;
+    margin: 0 auto !important;
+    padding: 10px !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  /* Full A4 Report Mode */
+  #printable-report {
+    display: block !important;
+    visibility: visible !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  @page {
+    size: A4 portrait;
+    margin: 10mm 12mm 10mm 12mm;
+  }
+
+  /* Print-safe Table rules */
+  table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    page-break-inside: auto !important;
+  }
+
+  thead {
+    display: table-header-group !important;
+  }
+
+  tfoot {
+    display: table-footer-group !important;
+  }
+
+  tr {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  th, td {
+    border: 1px solid #cbd5e1 !important;
+    padding: 5px 8px !important;
+  }
+
+  th {
+    background-color: #f1f5f9 !important;
+    font-weight: 700 !important;
+  }
+}
