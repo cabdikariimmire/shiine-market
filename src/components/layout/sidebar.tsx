@@ -58,6 +58,9 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
 
   // Filter based on user role
   const menuItems = allMenuItems.filter(item => {
+    if (role === 'seller') {
+      return item.href === '/sales/new';
+    }
     if (role === 'reporter') {
       return !item.adminOnly;
     }
@@ -83,7 +86,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
       >
         {/* Brand Header */}
         <div className="flex h-20 items-center justify-between px-6 border-b border-slate-100 dark:border-slate-800 bg-linear-to-r from-emerald-600/5 to-transparent">
-          <Link href="/dashboard" className="flex items-center gap-3">
+          <Link href={role === 'seller' ? '/sales/new' : '/dashboard'} className="flex items-center gap-3">
             <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-linear-to-br from-emerald-500 to-emerald-700 text-white shadow-md shadow-emerald-500/25">
               <Store className="h-6 w-6" />
             </div>
@@ -100,16 +103,18 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
         <div className="flex-1 overflow-y-auto px-4 py-4 space-y-1.5">
           <div className="flex items-center justify-between px-3 mb-2">
             <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">
-              {role === 'reporter' ? 'WARBIXINNADA (READ-ONLY)' : 'MAAMULKA GUUD'}
+              {role === 'seller' ? 'IIBKA & ADEEGA (POS)' : role === 'reporter' ? 'WARBIXINNADA (READ-ONLY)' : 'MAAMULKA GUUD'}
             </p>
             {role && (
               <span className={cn(
                 "text-[10px] font-black uppercase px-2 py-0.5 rounded-full",
                 role === 'admin' 
                   ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+                  : role === 'seller'
+                  ? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
                   : "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300"
               )}>
-                {role === 'admin' ? 'Admin' : 'Reporter'}
+                {role === 'admin' ? 'Admin' : role === 'seller' ? 'Seller / Iibiye' : 'Reporter'}
               </span>
             )}
           </div>

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { 
@@ -66,7 +66,7 @@ export default function SupplierDetailPage() {
 
   const [loading, setLoading] = useState(true);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       setLoading(true);
       const s = await repository.getSupplierById(supplierId);
@@ -80,13 +80,13 @@ export default function SupplierDetailPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [supplierId, selectedMonth]);
 
   useEffect(() => {
     if (supplierId) {
       loadData();
     }
-  }, [supplierId, selectedMonth]);
+  }, [supplierId, loadData]);
 
   if (loading && !supplier) {
     return (

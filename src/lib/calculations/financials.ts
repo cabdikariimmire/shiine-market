@@ -1,6 +1,13 @@
 import { CartItem, SaleItem } from '@/types';
 
 /**
+ * Rounds a monetary amount to 2 decimal places safely, avoiding IEEE 754 floating-point under-rounding.
+ */
+export function roundToCents(amount: number): number {
+  return Math.round((amount + Number.EPSILON) * 100) / 100;
+}
+
+/**
  * Calculates item subtotal, total price, and gross profit for a single cart line item.
  * Supports per-item discount and decimal quantities (e.g. 1.25 kg).
  */
@@ -13,12 +20,12 @@ export function calculateCartItemLine(
   const safeQty = Math.max(0, quantity);
   const safeUnitPrice = Math.max(0, unitPrice);
   const safeCost = Math.max(0, unitCost);
-  const rawLineTotal = safeUnitPrice * safeQty;
+  const rawLineTotal = roundToCents(safeUnitPrice * safeQty);
   const safeDiscount = Math.max(0, Math.min(itemDiscount, rawLineTotal));
 
-  const totalPrice = Math.round((rawLineTotal - safeDiscount) * 100) / 100;
-  const totalCost = Math.round(safeCost * safeQty * 100) / 100;
-  const grossProfit = Math.round((totalPrice - totalCost) * 100) / 100;
+  const totalPrice = roundToCents(rawLineTotal - safeDiscount);
+  const totalCost = roundToCents(safeCost * safeQty);
+  const grossProfit = roundToCents(totalPrice - totalCost);
 
   return { totalPrice, grossProfit, totalCost };
 }
@@ -47,21 +54,22 @@ export function calculateSaleTotal(
     const cost = 'unitCost' in item ? item.unitCost : item.unit_cost;
     const disc = item.discount || 0;
 
-    subtotal += price * qty;
+    const lineTotal = roundToCents(price * qty);
+    subtotal += lineTotal;
     itemDiscounts += disc;
-    costAmount += cost * qty;
+    costAmount += roundToCents(cost * qty);
   }
 
   const safeOverallDiscount = Math.max(0, wholeSaleDiscount);
-  const totalDiscount = Math.round((itemDiscounts + safeOverallDiscount) * 100) / 100;
-  const totalAmount = Math.max(0, Math.round((subtotal - totalDiscount) * 100) / 100);
-  const grossProfit = Math.round((totalAmount - costAmount) * 100) / 100;
+  const totalDiscount = roundToCents(itemDiscounts + safeOverallDiscount);
+  const totalAmount = Math.max(0, roundToCents(subtotal - totalDiscount));
+  const grossProfit = roundToCents(totalAmount - costAmount);
 
   return {
-    subtotal: Math.round(subtotal * 100) / 100,
+    subtotal: roundToCents(subtotal),
     totalDiscount,
     totalAmount,
-    costAmount: Math.round(costAmount * 100) / 100,
+    costAmount: roundToCents(costAmount),
     grossProfit,
   };
 }
@@ -76,14 +84,14 @@ export function calculateCOGS(
     const cost = item.buy_price ?? item.unit_cost ?? item.unitCost ?? 0;
     return acc + cost * (item.quantity || 0);
   }, 0);
-  return Math.round(total * 100) / 100;
+  return roundToCents(total);
 }
 
 /**
  * Gross Profit = Actual Sales Revenue - Cost of Goods Sold
  */
 export function calculateGrossProfit(actualRevenue: number, cogs: number): number {
-  return Math.round((actualRevenue - cogs) * 100) / 100;
+  return roundToCents(actualRevenue - cogs);
 }
 
 /**
@@ -91,7 +99,7 @@ export function calculateGrossProfit(actualRevenue: number, cogs: number): numbe
  * Inventory purchases are NOT treated as normal expenses.
  */
 export function calculateNetProfit(grossProfit: number, totalExpenses: number): number {
-  return Math.round((grossProfit - totalExpenses) * 100) / 100;
+  return roundToCents(grossProfit - totalExpenses);
 }
 
 /**
@@ -99,7 +107,7 @@ export function calculateNetProfit(grossProfit: number, totalExpenses: number): 
  */
 export function calculateDebtBalance(originalAmount: number, amountPaid: number): number {
   const remaining = Math.max(0, originalAmount - amountPaid);
-  return Math.round(remaining * 100) / 100;
+  return roundToCents(remaining);
 }
 
 /**
@@ -114,3 +122,4 @@ export function formatMoney(amount: number | null | undefined, currency: string 
     maximumFractionDigits: 2,
   })}`;
 }
+

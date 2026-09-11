@@ -143,6 +143,19 @@ export function calculateMinSellableQty(unitDivision: number = 1): number {
 }
 
 /**
+ * Resolves the configured fractional step / minimum sellable quantity dynamically from variant settings.
+ */
+export function getVariantStep(variant: { min_sellable_qty?: number; unit_division?: number }): number {
+  if (variant.min_sellable_qty && Number(variant.min_sellable_qty) > 0) {
+    return Number(variant.min_sellable_qty);
+  }
+  if (variant.unit_division && Number(variant.unit_division) > 1) {
+    return calculateMinSellableQty(Number(variant.unit_division));
+  }
+  return 1;
+}
+
+/**
  * Validates if the sold quantity aligns with the configured fractional division / minimum step.
  * Example: if minSellableQty is 0.25 (division = 4), 0.25, 0.50, 0.75, 1.00 are valid; 0.10, 0.20 are invalid.
  */
@@ -159,6 +172,14 @@ export function isValidSellableQuantity(
   }
 
   const step = minSellableQty > 0 ? minSellableQty : 1;
+
+  if (quantity < step - 0.0001) {
+    return {
+      valid: false,
+      reason: `Tiradu kama yaraan karto qiyaasta ugu yar ee la oggol yahay (${step} ${unit}).`,
+    };
+  }
+
   const ratio = quantity / step;
   const nearestInteger = Math.round(ratio);
   const diff = Math.abs(ratio - nearestInteger);

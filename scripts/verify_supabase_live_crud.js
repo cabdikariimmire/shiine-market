@@ -14,6 +14,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 // Read .env.local
 const envFile = fs.readFileSync(path.resolve(__dirname, '../.env.local'), 'utf8');
@@ -35,7 +36,7 @@ const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: { persistSession: false }
 });
 
-const generateId = () => 'tst_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+const generateId = () => crypto.randomUUID();
 
 async function runLiveVerification() {
   console.log('====================================================');
@@ -165,9 +166,7 @@ async function runLiveVerification() {
         id: testSupplierId,
         name: suppName,
         phone: suppPhone,
-        company: 'Test Wholesaler Ltd',
-        total_spend: 0,
-        total_purchases: 0
+        address: 'Test Wholesaler Ltd'
       }])
       .select()
       .single();
@@ -193,8 +192,7 @@ async function runLiveVerification() {
       .insert([{
         id: testProductId,
         name: prodName,
-        category_id: testCategoryId,
-        description: 'Test rice product'
+        category_id: testCategoryId
       }]);
     if (pErr) throw pErr;
 
@@ -262,8 +260,7 @@ async function runLiveVerification() {
         amount_paid: totalAmount,
         debt_amount: 0,
         cost_amount: costAmount,
-        gross_profit: grossProfit,
-        status: 'completed'
+        gross_profit: grossProfit
       }]);
     if (sErr) throw sErr;
 
@@ -274,14 +271,13 @@ async function runLiveVerification() {
         id: generateId(),
         sale_id: testSaleId,
         product_variant_id: testVariantId,
-        product_name: `Bariis Test ${testSuffix}`,
-        variant_name: '50kg Jawan',
         quantity: saleQty,
         unit: 'jawan',
         unit_price: unitPrice,
         unit_cost: 30.00,
-        subtotal: totalAmount,
-        profit: grossProfit
+        discount: 0,
+        total_price: totalAmount,
+        gross_profit: grossProfit
       }]);
     if (siErr) throw siErr;
 
@@ -401,12 +397,6 @@ async function runLiveVerification() {
       }]);
     if (dErr) throw dErr;
 
-    // Update Customer debt balance
-    await supabase.from('customers').update({
-      total_debt: originalDebt,
-      remaining_debt: originalDebt
-    }).eq('id', testCustomerId);
-
     // 2. Make Payment of $80
     const paymentAmount = 80.00;
     const paymentId = generateId();
@@ -429,11 +419,6 @@ async function runLiveVerification() {
       status: 'partial'
     }).eq('id', testDebtId);
 
-    await supabase.from('customers').update({
-      paid_debt: paymentAmount,
-      remaining_debt: 120.00
-    }).eq('id', testCustomerId);
-
     // Verify Debt record
     const { data: debt } = await supabase.from('debts').select('*').eq('id', testDebtId).single();
     if (Number(debt.remaining_balance) !== 120.00) throw new Error(`Expected remaining 120, got ${debt.remaining_balance}`);
@@ -454,32 +439,17 @@ async function runLiveVerification() {
         supplier_id: testSupplierId,
         reference_number: `INV-SUPP-${testSuffix}`,
         total_amount: incomingQty * buyPrice,
-        transaction_date: '2026-09-10',
-        status: 'completed'
+        transaction_date: '2026-09-10'
       }]);
     if (stxErr) throw stxErr;
 
-    // 2. Create Transaction Item
-    await supabase.from('supplier_transaction_items').insert([{
-      id: generateId(),
-      transaction_id: txId,
-      product_variant_id: testVariantId,
-      product_name: `Bariis Test ${testSuffix}`,
-      variant_name: '50kg Jawan',
-      quantity: incomingQty,
-      purchase_unit: 'jawan',
-      conversion_factor: 1,
-      buy_price: buyPrice,
-      total_price: incomingQty * buyPrice
-    }]);
-
-    // 3. Increase Existing Variant Stock (47 + 20 = 67)
+    // 2. Increase Existing Variant Stock (47 + 20 = 67)
     await supabase.from('product_variants').update({
       stock_quantity: 67,
       buy_price: buyPrice
     }).eq('id', testVariantId);
 
-    // 4. Create Stock Movement
+    // 3. Create Stock Movement
     await supabase.from('stock_movements').insert([{
       id: generateId(),
       product_variant_id: testVariantId,
@@ -561,10 +531,7 @@ async function runLiveVerification() {
     const { error: aErr } = await clientA.from('customers').insert([{
       id: sharedTestCustId,
       name: sharedCustName,
-      phone: '619998877',
-      total_debt: 0,
-      paid_debt: 0,
-      remaining_debt: 0
+      phone: '619998877'
     }]);
     if (aErr) throw aErr;
 

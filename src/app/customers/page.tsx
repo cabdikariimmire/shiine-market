@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { 
   Users, 
@@ -47,18 +47,18 @@ export default function CustomersPage() {
 
   const { success, error } = useToast();
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       const data = await repository.getCustomers(search);
       setCustomers(data);
     } catch (err) {
       console.error('Error loading customers:', err);
     }
-  };
+  }, [search]);
 
   useEffect(() => {
     loadData();
-  }, [search]);
+  }, [loadData]);
 
   const totalOutstandingDebt = customers.reduce((sum, c) => sum + (c.remaining_debt || 0), 0);
   const totalPaidDebt = customers.reduce((sum, c) => sum + (c.paid_debt || 0), 0);

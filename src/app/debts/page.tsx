@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { 
   CreditCard, 
@@ -90,7 +90,7 @@ export default function DebtsPage() {
 
   const [allDebts, setAllDebts] = useState<Debt[]>([]);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       const [filtered, payments, cal, all] = await Promise.all([
         repository.getDebts(statusFilter),
@@ -105,11 +105,11 @@ export default function DebtsPage() {
     } catch (err) {
       console.error('Error loading debts:', err);
     }
-  };
+  }, [statusFilter]);
 
   useEffect(() => {
     loadData();
-  }, [statusFilter]);
+  }, [loadData]);
 
   // Overall KPI Metrics
   const totalOriginal = allDebts.reduce((sum, d) => sum + d.original_amount, 0);

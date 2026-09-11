@@ -31,7 +31,10 @@ export default function LoginPage() {
     e.preventDefault();
     setErrorMessage(null);
 
-    if (!email.trim() || !password.trim()) {
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanPassword = password.trim();
+
+    if (!cleanEmail || !cleanPassword) {
       setErrorMessage('Fadlan geli email-ka iyo furaha sirta ah.');
       return;
     }
@@ -39,17 +42,22 @@ export default function LoginPage() {
     setIsLoading(true);
 
     try {
-      const res = await login(email, password);
-      if (res.success) {
-        success('Ku soo dhawoow Tukaan POS!', `Waxaad ku gashay: ${res.user?.name} (${res.user?.role === 'admin' ? 'Admin' : 'Reporter'})`);
-        router.replace('/dashboard');
+      const res = await login(cleanEmail, cleanPassword);
+      if (res.success && res.user) {
+        const roleLabel = res.user.role === 'admin' ? 'Admin' : (res.user.role === 'seller' ? 'Seller / Iibiye' : 'Reporter');
+        success('Ku soo dhawoow Tukaan POS!', `Waxaad ku gashay: ${res.user.name} (${roleLabel})`);
+        
+        const targetUrl = res.user.role === 'seller' ? '/sales/new' : '/dashboard';
+        router.replace(targetUrl);
       } else {
-        setErrorMessage(res.error || 'Email ama furaha sirta ah ma saxna');
-        error('Galitaanka waa la diiday', res.error);
+        const errorMsg = res.error || 'Email ama furaha sirta ah ma saxna';
+        setErrorMessage(errorMsg);
+        error('Galitaanka waa la diiday', errorMsg);
       }
     } catch (err: any) {
-      setErrorMessage(err.message || 'Khalad baa dhacay');
-      error('Khalad', err.message);
+      const errorMsg = err?.message || 'Khalad baa dhacay intii lagu jiray galitaanka';
+      setErrorMessage(errorMsg);
+      error('Khalad', errorMsg);
     } finally {
       setIsLoading(false);
     }

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Settings, 
   Store, 
@@ -72,13 +72,13 @@ export default function SettingsPage() {
   const [newUserName, setNewUserName] = useState('');
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserPassword, setNewUserPassword] = useState('');
-  const [newUserRole, setNewUserRole] = useState<UserRole>('reporter');
+  const [newUserRole, setNewUserRole] = useState<UserRole>('seller');
 
   // Edit User State
   const [editingUser, setEditingUser] = useState<SystemUser | null>(null);
   const [editUserName, setEditUserName] = useState('');
   const [editUserEmail, setEditUserEmail] = useState('');
-  const [editUserRole, setEditUserRole] = useState<UserRole>('reporter');
+  const [editUserRole, setEditUserRole] = useState<UserRole>('seller');
   const [editUserStatus, setEditUserStatus] = useState<UserStatus>('active');
 
   // Reset Password State
@@ -110,14 +110,14 @@ export default function SettingsPage() {
     }
   };
 
-  const loadAuditLogs = async () => {
+  const loadAuditLogs = useCallback(async () => {
     try {
       const logs = await repository.getAuditLogs(auditSearch, auditEntityFilter, auditActionFilter);
       setAuditLogs(logs);
     } catch (err) {
       console.error('Error loading audit logs:', err);
     }
-  };
+  }, [auditSearch, auditEntityFilter, auditActionFilter]);
 
   useEffect(() => {
     loadSettings();
@@ -128,7 +128,7 @@ export default function SettingsPage() {
     if (activeTab === 'audit') {
       loadAuditLogs();
     }
-  }, [activeTab, auditSearch, auditEntityFilter, auditActionFilter]);
+  }, [activeTab, loadAuditLogs]);
 
   const handleSave = async () => {
     try {
@@ -397,6 +397,10 @@ export default function SettingsPage() {
                           {u.role === 'admin' ? (
                             <Badge className="bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 font-bold">
                               Admin (Full Access)
+                            </Badge>
+                          ) : u.role === 'seller' ? (
+                            <Badge className="bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 font-bold">
+                              Seller / Iibiye (POS Kaliya)
                             </Badge>
                           ) : (
                             <Badge className="bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 font-bold">
@@ -862,6 +866,7 @@ export default function SettingsPage() {
               onChange={(e) => setNewUserRole(e.target.value as UserRole)}
               className="mt-1 flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-bold"
             >
+              <option value="seller">Seller / Iibiye — POS & Iibinta Kaliya</option>
               <option value="admin">Admin — Full Access (Dhammaan qeybaha & maaraynta)</option>
               <option value="reporter">Reporter — Read-Only (Dashboard & Warbixinnada kaliya)</option>
             </select>
@@ -918,6 +923,7 @@ export default function SettingsPage() {
                 onChange={(e) => setEditUserRole(e.target.value as UserRole)}
                 className="mt-1 flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-bold"
               >
+                <option value="seller">Seller / Iibiye (POS Kaliya)</option>
                 <option value="admin">Admin (Full Access)</option>
                 <option value="reporter">Reporter (Read-Only)</option>
               </select>

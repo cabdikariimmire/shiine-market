@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { 
   ShoppingCart, 
@@ -36,6 +36,7 @@ import {
   calculateCostPerBaseUnit, 
   calculateUnitProfit, 
   calculateMinSellableQty, 
+  getVariantStep,
   isValidSellableQuantity 
 } from '@/lib/calculations/stock';
 import { CartItem, Category, Customer, PaymentMethod, ProductVariant, Sale } from '@/types';
@@ -68,7 +69,7 @@ export default function POSTerminalPage() {
   const [isBarcodeOpen, setIsBarcodeOpen] = useState(false);
   const [completedSale, setCompletedSale] = useState<Sale | null>(null);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       const [res, cats, custs] = await Promise.all([
         repository.getVariantsPaginated(search, selectedCategory, 'all', 1, 40),
@@ -81,11 +82,11 @@ export default function POSTerminalPage() {
     } catch (err) {
       console.error('Error loading POS data:', err);
     }
-  };
+  }, [search, selectedCategory]);
 
   useEffect(() => {
     loadData();
-  }, [search, selectedCategory]);
+  }, [loadData]);
 
   // Set default due date (7 days from now)
   useEffect(() => {
@@ -107,9 +108,26 @@ export default function POSTerminalPage() {
     }
   }, [paymentMethod, totals.totalAmount]);
 
+  // Helper to update confirmed cart quantity and line total
+  const updateCartItemQuantity = (variantId: string, quantity: number, quantityInput?: string) => {
+    setCart(prev => prev.map(i => {
+      if (i.variant.id === variantId) {
+        const line = calculateCartItemLine(i.unitPrice, i.unitCost, quantity, i.discount);
+        return {
+          ...i,
+          quantity,
+          quantityInput: quantityInput !== undefined ? quantityInput : String(quantity),
+          totalPrice: line.totalPrice,
+          grossProfit: line.grossProfit,
+        };
+      }
+      return i;
+    }));
+  };
+
   // Add Variant to Cart with Fractional & Minimum Sellable Quantity Validation
   const addToCart = (variant: ProductVariant, customAddQty?: number) => {
-    const step = variant.min_sellable_qty || (variant.unit_division ? calculateMinSellableQty(variant.unit_division) : 1);
+    const step = getVariantStep(variant);
 
     if (variant.stock_quantity <= 0) {
       error(`Lama iibin karo — "${variant.product?.name} (${variant.variant_name})" way dhammaatay (🔴 Out of Stock)!`);
@@ -121,9 +139,10 @@ export default function POSTerminalPage() {
       return;
     }
 
+    // Default quantity when adding is 1 (or step if available stock is less than 1)
     const defaultAdd = customAddQty !== undefined 
       ? customAddQty 
-      : (variant.stock_quantity < 1 ? step : (step <= 0.25 ? 1 : step));
+      : (variant.stock_quantity < 1 ? step : 1);
 
     const existingIndex = cart.findIndex(item => item.variant.id === variant.id);
     const existingQty = existingIndex !== -1 ? cart[existingIndex].quantity : 0;
@@ -151,6 +170,7 @@ export default function POSTerminalPage() {
         updated[existingIndex] = {
           ...existing,
           quantity: targetQty,
+          quantityInput: String(targetQty),
           totalPrice: line.totalPrice,
           grossProfit: line.grossProfit,
         };
@@ -163,6 +183,7 @@ export default function POSTerminalPage() {
             product: variant.product || { id: variant.product_id, name: 'Alaab', created_at: '', updated_at: '' },
             variant,
             quantity: defaultAdd,
+            quantityInput: String(defaultAdd),
             unitPrice: variant.sell_price,
             unitCost: costPerBase,
             discount: 0,
@@ -176,44 +197,122 @@ export default function POSTerminalPage() {
     info(`Ku daray dambiisha: ${variant.product?.name} (${variant.variant_name}) +${defaultAdd} ${variant.selling_unit}`);
   };
 
-  // Update Cart Quantity with Strict Stock Cap & Division Validation
-  const updateCartQty = (variantId: string, newQty: number, enforceValidation: boolean = false) => {
-    const item = cart.find(i => i.variant.id === variantId);
-    if (!item) return;
+  // Quantity Increment (+) button using dynamic fractional step
+  const handleIncrement = (item: CartItem) => {
+    const step = getVariantStep(item.variant);
+    const targetQty = Number((item.quantity + step).toFixed(4));
 
-    const step = item.variant.min_sellable_qty || (item.variant.unit_division ? calculateMinSellableQty(item.variant.unit_division) : 1);
-    const safeQty = Math.max(0, Number(newQty.toFixed(4)));
-
-    if (safeQty === 0) {
-      setCart(prev => prev.filter(i => i.variant.id !== variantId));
-      return;
-    }
-
-    if (safeQty > item.variant.stock_quantity) {
+    if (targetQty > item.variant.stock_quantity) {
       error(`Stock-ku kuma filna. Waxaa haray kaliya ${item.variant.stock_quantity} ${item.variant.selling_unit}.`);
       return;
     }
 
-    if (enforceValidation) {
-      const val = isValidSellableQuantity(safeQty, step, item.variant.selling_unit);
-      if (!val.valid) {
-        error(val.reason || 'Tirada ma aha qeyb sax ah');
-        return;
-      }
+    const safeQty = Math.min(item.variant.stock_quantity, targetQty);
+    updateCartItemQuantity(item.variant.id, safeQty, String(safeQty));
+  };
+
+  // Quantity Decrement (-) button using dynamic fractional step (stops at step)
+  const handleDecrement = (item: CartItem) => {
+    const step = getVariantStep(item.variant);
+    const targetQty = Number((item.quantity - step).toFixed(4));
+
+    // When '-' reaches the minimum allowed quantity, stop there (do not go below step, do not delete item)
+    if (targetQty < step - 0.0001) {
+      return;
     }
 
+    const safeQty = Math.max(step, targetQty);
+    updateCartItemQuantity(item.variant.id, safeQty, String(safeQty));
+  };
+
+  // Direct Quantity input typing (allows deleting '1' temporarily without crashing or removing item)
+  const handleQuantityInputChange = (variantId: string, rawVal: string) => {
+    const item = cart.find(i => i.variant.id === variantId);
+    if (!item) return;
+
+    const parsed = parseFloat(rawVal);
+
+    if (rawVal === '' || isNaN(parsed) || parsed <= 0) {
+      // Keep cart item alive with temporary input string
+      setCart(prev => prev.map(i => {
+        if (i.variant.id === variantId) {
+          return {
+            ...i,
+            quantityInput: rawVal,
+          };
+        }
+        return i;
+      }));
+      return;
+    }
+
+    const cappedQty = Math.min(item.variant.stock_quantity, parsed);
     setCart(prev => prev.map(i => {
       if (i.variant.id === variantId) {
-        const line = calculateCartItemLine(i.unitPrice, i.unitCost, safeQty, i.discount);
+        const line = calculateCartItemLine(i.unitPrice, i.unitCost, cappedQty, i.discount);
         return {
           ...i,
-          quantity: safeQty,
+          quantity: cappedQty,
+          quantityInput: rawVal,
           totalPrice: line.totalPrice,
           grossProfit: line.grossProfit,
         };
       }
       return i;
     }));
+  };
+
+  // Validate on input blur
+  const handleQuantityInputBlur = (variantId: string) => {
+    const item = cart.find(i => i.variant.id === variantId);
+    if (!item) return;
+
+    const step = getVariantStep(item.variant);
+    const rawVal = item.quantityInput !== undefined ? item.quantityInput.trim() : String(item.quantity);
+    const parsed = parseFloat(rawVal);
+
+    if (rawVal === '' || isNaN(parsed) || parsed <= 0) {
+      const fallback = item.variant.stock_quantity < 1 ? step : (step <= 1 ? 1 : step);
+      const safeQty = Math.min(item.variant.stock_quantity, fallback);
+      updateCartItemQuantity(variantId, safeQty, String(safeQty));
+      return;
+    }
+
+    if (parsed > item.variant.stock_quantity) {
+      error(`Stock-ku kuma filna. Waxaa haray kaliya ${item.variant.stock_quantity} ${item.variant.selling_unit}.`);
+      updateCartItemQuantity(variantId, item.variant.stock_quantity, String(item.variant.stock_quantity));
+      return;
+    }
+
+    if (parsed < step - 0.0001) {
+      error(`Tirada ugu yar ee la iibin karo waa ${step} ${item.variant.selling_unit}.`);
+      updateCartItemQuantity(variantId, step, String(step));
+      return;
+    }
+
+    const validation = isValidSellableQuantity(parsed, step, item.variant.selling_unit);
+    if (!validation.valid) {
+      error(validation.reason || 'Tirada ma aha qeyb sax ah');
+      // Snap to nearest valid step multiple
+      const snapped = Number((Math.max(1, Math.round(parsed / step)) * step).toFixed(4));
+      const safeSnapped = Math.min(item.variant.stock_quantity, snapped);
+      updateCartItemQuantity(variantId, safeSnapped, String(safeSnapped));
+      return;
+    }
+
+    const safeQty = Number(parsed.toFixed(4));
+    updateCartItemQuantity(variantId, safeQty, String(safeQty));
+  };
+
+  // Quick fractional step addition (+0.25, +0.5, +1, +5)
+  const handleAddQuickQty = (item: CartItem, addQty: number) => {
+    const targetQty = Number((item.quantity + addQty).toFixed(4));
+    if (targetQty > item.variant.stock_quantity) {
+      error(`Stock-ku kuma filna. Waxaa haray kaliya ${item.variant.stock_quantity} ${item.variant.selling_unit}.`);
+      updateCartItemQuantity(item.variant.id, item.variant.stock_quantity, String(item.variant.stock_quantity));
+      return;
+    }
+    updateCartItemQuantity(item.variant.id, targetQty, String(targetQty));
   };
 
   // Update Cart Line Price or Discount
@@ -253,7 +352,11 @@ export default function POSTerminalPage() {
 
     // Strict validation of fractional units and remaining stock before submission
     for (const item of cart) {
-      const step = item.variant.min_sellable_qty || (item.variant.unit_division ? calculateMinSellableQty(item.variant.unit_division) : 1);
+      const step = getVariantStep(item.variant);
+      if (item.quantity <= 0) {
+        error(`Qalad tirada: "${item.product.name}" (${item.variant.variant_name}) — Fadlan geli tiro sax ah.`);
+        return;
+      }
       const val = isValidSellableQuantity(item.quantity, step, item.variant.selling_unit);
       if (!val.valid) {
         error(`Qalad tirada: "${item.product.name}" (${item.variant.variant_name}): ${val.reason}`);
@@ -367,7 +470,7 @@ export default function POSTerminalPage() {
                 const costPerBase = calculateCostPerBaseUnit(v.buy_price, v.conversion_factor);
                 const profit = calculateUnitProfit(v.sell_price, costPerBase);
                 const isOutOfStock = v.stock_quantity <= 0;
-                const minSellable = v.min_sellable_qty || (v.unit_division ? calculateMinSellableQty(v.unit_division) : 1);
+                const minSellable = getVariantStep(v);
 
                 return (
                   <button
@@ -468,7 +571,7 @@ export default function POSTerminalPage() {
               </div>
             ) : (
               cart.map((item) => {
-                const step = item.variant.min_sellable_qty || (item.variant.unit_division ? calculateMinSellableQty(item.variant.unit_division) : 1);
+                const step = getVariantStep(item.variant);
 
                 return (
                   <div
@@ -499,30 +602,31 @@ export default function POSTerminalPage() {
                       <div className="flex items-center gap-1">
                         <button
                           type="button"
-                          onClick={() => updateCartQty(item.variant.id, Math.max(0, Number((item.quantity - step).toFixed(4))), true)}
-                          className="h-7 px-1.5 min-w-[28px] flex items-center justify-center rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs"
+                          onClick={() => handleDecrement(item)}
+                          disabled={item.quantity <= step}
+                          className="h-7 w-7 flex items-center justify-center rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                           title={`Jar ${step} ${item.variant.selling_unit}`}
                         >
-                          -{step}
+                          <Minus className="h-3.5 w-3.5" />
                         </button>
 
                         <Input
-                          type="number"
-                          step={step}
-                          min={step}
-                          value={item.quantity}
-                          onChange={(e) => updateCartQty(item.variant.id, parseFloat(e.target.value) || 0, false)}
-                          onBlur={(e) => updateCartQty(item.variant.id, parseFloat(e.target.value) || step, true)}
+                          type="text"
+                          inputMode="decimal"
+                          value={item.quantityInput !== undefined ? item.quantityInput : item.quantity}
+                          onChange={(e) => handleQuantityInputChange(item.variant.id, e.target.value)}
+                          onBlur={() => handleQuantityInputBlur(item.variant.id)}
                           className="h-7 w-20 text-center font-mono font-bold text-xs p-1 bg-white dark:bg-slate-900"
                         />
 
                         <button
                           type="button"
-                          onClick={() => updateCartQty(item.variant.id, Number((item.quantity + step).toFixed(4)), true)}
-                          className="h-7 px-1.5 min-w-[28px] flex items-center justify-center rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs"
+                          onClick={() => handleIncrement(item)}
+                          disabled={item.quantity >= item.variant.stock_quantity}
+                          className="h-7 w-7 flex items-center justify-center rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                           title={`Ku dar ${step} ${item.variant.selling_unit}`}
                         >
-                          +{step}
+                          <Plus className="h-3.5 w-3.5" />
                         </button>
 
                         {/* Fractional Quick Steps */}
@@ -530,24 +634,24 @@ export default function POSTerminalPage() {
                           <>
                             <button
                               type="button"
-                              onClick={() => updateCartQty(item.variant.id, Number((item.quantity + step).toFixed(4)), true)}
-                              className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300"
+                              onClick={() => handleAddQuickQty(item, step)}
+                              className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600"
                               title={`Ku dar ${step} ${item.variant.selling_unit}`}
                             >
                               +{step}
                             </button>
                             <button
                               type="button"
-                              onClick={() => updateCartQty(item.variant.id, Number((item.quantity + Number((step * 2).toFixed(4))).toFixed(4)), true)}
-                              className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300"
+                              onClick={() => handleAddQuickQty(item, Number((step * 2).toFixed(4)))}
+                              className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600"
                               title={`Ku dar ${Number((step * 2).toFixed(4))} ${item.variant.selling_unit}`}
                             >
                               +{Number((step * 2).toFixed(4))}
                             </button>
                             <button
                               type="button"
-                              onClick={() => updateCartQty(item.variant.id, Number((item.quantity + 1).toFixed(4)), true)}
-                              className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300"
+                              onClick={() => handleAddQuickQty(item, 1)}
+                              className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600"
                               title={`Ku dar 1 ${item.variant.selling_unit}`}
                             >
                               +1
@@ -557,16 +661,16 @@ export default function POSTerminalPage() {
                           <>
                             <button
                               type="button"
-                              onClick={() => updateCartQty(item.variant.id, Number((item.quantity + 1).toFixed(4)), true)}
-                              className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300"
+                              onClick={() => handleAddQuickQty(item, 1)}
+                              className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600"
                               title={`Ku dar 1 ${item.variant.selling_unit}`}
                             >
                               +1
                             </button>
                             <button
                               type="button"
-                              onClick={() => updateCartQty(item.variant.id, Number((item.quantity + 5).toFixed(4)), true)}
-                              className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300"
+                              onClick={() => handleAddQuickQty(item, 5)}
+                              className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600"
                               title={`Ku dar 5 ${item.variant.selling_unit}`}
                             >
                               +5

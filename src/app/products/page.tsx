@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { 
@@ -114,7 +114,7 @@ export default function ProductsPage() {
   const [historyVariant, setHistoryVariant] = useState<ProductVariant | null>(null);
   const [movements, setMovements] = useState<StockMovement[]>([]);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       const [res, cats, supps] = await Promise.all([
         repository.getVariantsPaginated(search, selectedCategory, statusFilter, currentPage, pageSize),
@@ -129,11 +129,11 @@ export default function ProductsPage() {
     } catch (err) {
       console.error('Error loading products:', err);
     }
-  };
+  }, [search, selectedCategory, statusFilter, currentPage, pageSize]);
 
   useEffect(() => {
     loadData();
-  }, [search, selectedCategory, statusFilter, currentPage, pageSize]);
+  }, [loadData]);
 
   // Open Edit Modal
   const handleOpenEdit = (v: ProductVariant) => {
@@ -175,8 +175,8 @@ export default function ProductsPage() {
     try {
       if (editingVariant.is_pending) {
         await repository.finalizePendingVariant(editingVariant.id, {
-          productName: editProductName,
-          variantName: editVariantName,
+          productName: editProductName.trim(),
+          variantName: editVariantName.trim(),
           buyPrice: buyPrice,
           purchaseUnit: editPurchaseUnit,
           sellPrice: sellPrice,
@@ -185,18 +185,18 @@ export default function ProductsPage() {
           unitDivision: division,
           minSellableQty: minSellable,
           quantityToAdd: incomingQty,
-          categoryId: editCategoryId,
+          categoryId: editCategoryId.trim() ? editCategoryId.trim() : undefined,
           minimumStock: minStock,
-          supplierId: editSupplierId,
+          supplierId: editSupplierId.trim() ? editSupplierId.trim() : undefined,
         }, editReason.trim() || `Xaqiijiyey AI pending: ${editProductName}`);
         success('Alaabta waa la xaqiijiyey!', `${editProductName} (${editVariantName}) hadda waa rasmi.`);
       } else {
         await repository.updateVariant(editingVariant.id, {
-          productName: editProductName,
-          categoryId: editCategoryId,
-          variant_name: editVariantName,
-          sku: editSku.trim(),
-          barcode: editBarcode.trim(),
+          productName: editProductName.trim(),
+          categoryId: editCategoryId.trim() ? editCategoryId.trim() : null,
+          variant_name: editVariantName.trim(),
+          sku: editSku.trim() || null,
+          barcode: editBarcode.trim() || null,
           buy_price: buyPrice,
           purchase_unit: editPurchaseUnit,
           sell_price: sellPrice,
@@ -205,7 +205,7 @@ export default function ProductsPage() {
           unit_division: division,
           min_sellable_qty: minSellable,
           minimum_stock: minStock,
-          supplier_id: editSupplierId,
+          supplier_id: editSupplierId.trim() ? editSupplierId.trim() : null,
         }, editReason.trim() || `Wax ka beddel alaabta: ${editProductName} (${editVariantName})`);
         success('Xogta si guul leh ayaa loo saxay.', `${editProductName} (${editVariantName})`);
       }

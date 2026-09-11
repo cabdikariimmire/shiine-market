@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { 
   DollarSign, 
@@ -39,7 +39,7 @@ export default function DashboardPage() {
   const [salesRows, setSalesRows] = useState<SalesReportRow[]>([]);
   const [lowStockVariants, setLowStockVariants] = useState<ProductVariant[]>([]);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       const [m, sr, lowRes, outRes] = await Promise.all([
         repository.getDashboardMetrics(dateFilter),
@@ -53,11 +53,11 @@ export default function DashboardPage() {
     } catch (err) {
       console.error('Error loading dashboard data:', err);
     }
-  };
+  }, [dateFilter]);
 
   useEffect(() => {
     loadData();
-  }, [dateFilter]);
+  }, [loadData]);
 
   return (
     <AppShell title="Dashboard">

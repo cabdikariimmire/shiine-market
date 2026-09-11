@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { 
@@ -60,7 +60,7 @@ export default function CustomerDetailPage() {
   const [correctPayNotes, setCorrectPayNotes] = useState<string>('');
   const [correctPayReason, setCorrectPayReason] = useState<string>('');
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       const data = await repository.getCustomerById(customerId);
       if (!data) {
@@ -73,11 +73,11 @@ export default function CustomerDetailPage() {
     } catch (err) {
       console.error('Error loading customer detail:', err);
     }
-  };
+  }, [customerId, error, router]);
 
   useEffect(() => {
     loadData();
-  }, [customerId]);
+  }, [loadData]);
 
   if (!customerData) {
     return (

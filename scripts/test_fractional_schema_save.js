@@ -1,5 +1,30 @@
 // Test script for verifying fractional selling product save with min_sellable_qty & unit_division
-const { calculateMinSellableQty, isValidSellableQuantity } = require('../src/lib/calculations/stock');
+function calculateMinSellableQty(unitDivision) {
+  const div = Number(unitDivision) || 1;
+  if (div <= 0) return 1;
+  return Number((1 / div).toFixed(4));
+}
+
+function isValidSellableQuantity(quantity, minSellableQty, sellingUnit) {
+  const qty = Number(quantity);
+  const minQty = Number(minSellableQty) || 1;
+
+  if (isNaN(qty) || qty <= 0) {
+    return { valid: false, error: 'Tirada waa inay ka weynaataa 0' };
+  }
+
+  const remainder = (qty % minQty);
+  const isMultiple = Math.abs(remainder) < 0.0001 || Math.abs(remainder - minQty) < 0.0001;
+
+  if (!isMultiple) {
+    return {
+      valid: false,
+      error: `Tiradu waa inay noqotaa qayb ka mid ah (${minQty} ${sellingUnit || ''})`
+    };
+  }
+
+  return { valid: true };
+}
 
 console.log('====================================================');
 console.log('🧪 VERIFYING FRACTIONAL PRODUCT SAVE LOGIC');

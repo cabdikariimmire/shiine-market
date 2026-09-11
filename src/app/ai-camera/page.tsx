@@ -78,6 +78,7 @@ export default function AICameraPage() {
 
   // File input ref for upload
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const isDetectingRef = useRef<boolean>(false);
 
   useEffect(() => {
     repository.getVariantsPaginated('', 'all', 'all', 1, 10000).then(res => setAllVariants(res.data)).catch(console.error);
@@ -97,6 +98,11 @@ export default function AICameraPage() {
   const handleModeSwitch = (mode: 'live_count' | 'invoice_scan') => {
     setActiveMode(mode);
     setIsLiveCountingStarted(false);
+    setLiveDetections([]);
+    if (canvasRef.current) {
+      const ctx = canvasRef.current.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    }
     if (mode === 'invoice_scan') {
       stopCamera();
     } else {
@@ -105,32 +111,51 @@ export default function AICameraPage() {
     }
   };
 
-  // Continuous Detection Loop for Live Video
+  const handleStartLiveCounting = async () => {
+    if (!isModelReady) {
+      const ready = await detectionService.initialize();
+      setIsModelReady(ready);
+    }
+    setIsLiveCountingStarted(true);
+  };
+
+  // Safe, Throttled Detection Loop for Live Video (Cross-Platform Mobile + Desktop)
   useEffect(() => {
-    let animationFrameId: number;
+    let timeoutId: NodeJS.Timeout;
     let isSubscribed = true;
 
     const runDetection = async () => {
       if (
-        isSubscribed &&
-        activeMode === 'live_count' &&
-        isCameraActive &&
-        isLiveCountingStarted &&
-        videoRef.current &&
-        videoRef.current.readyState >= 2
+        !isSubscribed ||
+        activeMode !== 'live_count' ||
+        !isCameraActive ||
+        !isLiveCountingStarted ||
+        !videoRef.current
       ) {
+        return;
+      }
+
+      const video = videoRef.current;
+
+      // Ensure video is ready with positive dimensions before running AI
+      if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0 && !isDetectingRef.current) {
+        isDetectingRef.current = true;
         try {
-          const results = await detectionService.detectFrame(videoRef.current, allVariants);
+          const results = await detectionService.detectFrame(video, allVariants);
           if (isSubscribed) {
             setLiveDetections(results);
 
             // Draw real bounding boxes on canvas overlay
-            if (canvasRef.current && videoRef.current) {
-              const ctx = canvasRef.current.getContext('2d');
+            if (canvasRef.current && video) {
+              const canvas = canvasRef.current;
+              if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+              }
+
+              const ctx = canvas.getContext('2d');
               if (ctx) {
-                canvasRef.current.width = videoRef.current.videoWidth || 640;
-                canvasRef.current.height = videoRef.current.videoHeight || 480;
-                ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
 
                 results.forEach((res) => {
                   res.boundingBoxes?.forEach((box) => {
@@ -139,33 +164,42 @@ export default function AICameraPage() {
                     ctx.strokeRect(box.x, box.y, box.width, box.height);
 
                     ctx.fillStyle = 'rgba(16, 185, 129, 0.9)';
-                    ctx.fillRect(box.x, box.y - 24, box.width, 24);
+                    ctx.fillRect(box.x, Math.max(0, box.y - 24), box.width, 24);
 
                     ctx.fillStyle = '#ffffff';
                     ctx.font = 'bold 12px sans-serif';
-                    ctx.fillText(`${res.productName} (${res.confidence}%)`, box.x + 6, box.y - 6);
+                    ctx.fillText(`${res.productName} (${res.confidence}%)`, box.x + 6, Math.max(16, box.y - 6));
                   });
                 });
               }
             }
           }
         } catch (e) {
-          console.error('Detection frame execution error:', e);
+          console.error('[AI Camera] Detection frame execution error:', e);
+        } finally {
+          isDetectingRef.current = false;
         }
       }
 
+      // Schedule next detection with a 250ms cadence (smooth ~4 FPS inference, preventing mobile thermal throttling)
       if (isSubscribed && activeMode === 'live_count' && isCameraActive && isLiveCountingStarted) {
-        animationFrameId = requestAnimationFrame(runDetection);
+        timeoutId = setTimeout(runDetection, 250);
       }
     };
 
     if (activeMode === 'live_count' && isCameraActive && isLiveCountingStarted) {
       runDetection();
+    } else {
+      if (canvasRef.current) {
+        const ctx = canvasRef.current.getContext('2d');
+        if (ctx) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+      }
     }
 
     return () => {
       isSubscribed = false;
-      cancelAnimationFrame(animationFrameId);
+      isDetectingRef.current = false;
+      clearTimeout(timeoutId);
     };
   }, [activeMode, isCameraActive, isLiveCountingStarted, allVariants, videoRef]);
 
@@ -378,7 +412,7 @@ export default function AICameraPage() {
               <strong className="font-bold text-sm block">Khalad Kaamero:</strong>
               {cameraError}
             </div>
-            <Button size="sm" variant="outline" onClick={startCamera} className="border-red-300 text-red-700 dark:border-red-800 dark:text-red-300 h-8 text-xs shrink-0">
+            <Button size="sm" variant="outline" onClick={() => startCamera()} className="border-red-300 text-red-700 dark:border-red-800 dark:text-red-300 h-8 text-xs shrink-0">
               Dib u tijaabi
             </Button>
           </div>
@@ -458,7 +492,7 @@ export default function AICameraPage() {
                       <p className="text-xs text-slate-400 mt-1">Guji badhanka hoose si aad u furto kaamirada tooska ah.</p>
                     </div>
                     <Button 
-                      onClick={startCamera} 
+                      onClick={() => startCamera()} 
                       disabled={isStarting}
                       className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold gap-2 shadow-md"
                     >
@@ -478,15 +512,16 @@ export default function AICameraPage() {
 
                 {isCameraActive && (
                   <div className="absolute top-3 left-3 flex items-center gap-2 bg-slate-900/80 text-white px-3 py-1 rounded-full text-xs font-bold backdrop-blur-xs">
-                    <div className={`h-2.5 w-2.5 rounded-full ${isLiveCountingStarted ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'}`} />
-                    {isLiveCountingStarted ? 'LIVE AI DETECTING' : 'CAMERA ACTIVE'}
+                    <div className={`h-2.5 w-2.5 rounded-full ${isLiveCountingStarted ? (isModelReady ? 'bg-emerald-500 animate-pulse' : 'bg-blue-400') : 'bg-amber-400'}`} />
+                    {isLiveCountingStarted ? (isModelReady ? 'LIVE AI DETECTING' : 'AI MODEL LOADING...') : 'CAMERA ACTIVE'}
                   </div>
                 )}
 
-                {isCameraActive && hasMultipleCameras && (
+                {isCameraActive && (
                   <button
                     onClick={switchCamera}
-                    className="absolute top-3 right-3 flex items-center gap-1.5 bg-slate-900/80 text-white px-3 py-1 rounded-full text-xs font-bold backdrop-blur-xs hover:bg-slate-800 transition-colors"
+                    className="absolute top-3 right-3 flex items-center gap-1.5 bg-slate-900/80 text-white px-3 py-1.5 rounded-full text-xs font-bold backdrop-blur-xs hover:bg-slate-800 transition-colors shadow-sm"
+                    title="Beddel Kaamirada (Switch Camera)"
                   >
                     <RotateCw className="h-3.5 w-3.5" />
                     {facingMode === 'environment' ? 'Camera Dambe' : 'Camera Hore'}
@@ -500,7 +535,7 @@ export default function AICameraPage() {
                   {isCameraActive && !isLiveCountingStarted && (
                     <Button 
                       size="sm" 
-                      onClick={() => setIsLiveCountingStarted(true)} 
+                      onClick={handleStartLiveCounting} 
                       className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs h-8 gap-1.5 shadow-sm"
                     >
                       <Play className="h-3.5 w-3.5" /> Bilaaw Tirinta Live
@@ -512,7 +547,7 @@ export default function AICameraPage() {
                     </Button>
                   )}
                   {!isCameraActive && (
-                    <Button size="sm" variant="outline" onClick={startCamera} className="text-xs h-8">
+                    <Button size="sm" variant="outline" onClick={() => startCamera()} className="text-xs h-8">
                       <Video className="h-3.5 w-3.5 mr-1" /> Fur Kaamirada
                     </Button>
                   )}
@@ -538,7 +573,7 @@ export default function AICameraPage() {
                   <p className="text-[11px] text-slate-400">Guji badhanka <strong>"Bilaaw Tirinta Live"</strong> si AI-du u bilowdo aqoonsiga jawannada/kartoomada.</p>
                   <Button 
                     size="sm" 
-                    onClick={() => setIsLiveCountingStarted(true)} 
+                    onClick={handleStartLiveCounting} 
                     className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs gap-1.5 mx-auto"
                   >
                     <Play className="h-3.5 w-3.5" /> Bilaaw Tirinta Live
@@ -680,7 +715,7 @@ export default function AICameraPage() {
                               <p className="text-xs text-slate-400 mt-1">U qabo kaamirada warqadda invoice-ka si cad.</p>
                             </div>
                             <Button 
-                              onClick={startCamera} 
+                              onClick={() => startCamera()} 
                               disabled={isStarting}
                               className="bg-blue-600 hover:bg-blue-700 text-white font-bold gap-2 shadow-md"
                             >
@@ -698,15 +733,14 @@ export default function AICameraPage() {
                               </span>
                             </div>
 
-                            {hasMultipleCameras && (
-                              <button
-                                onClick={switchCamera}
-                                className="absolute top-3 right-3 flex items-center gap-1.5 bg-slate-900/80 text-white px-3 py-1 rounded-full text-xs font-bold backdrop-blur-xs hover:bg-slate-800"
-                              >
-                                <RotateCw className="h-3.5 w-3.5" />
-                                {facingMode === 'environment' ? 'Camera Dambe' : 'Camera Hore'}
-                              </button>
-                            )}
+                            <button
+                              onClick={switchCamera}
+                              className="absolute top-3 right-3 flex items-center gap-1.5 bg-slate-900/80 text-white px-3 py-1.5 rounded-full text-xs font-bold backdrop-blur-xs hover:bg-slate-800 transition-colors shadow-sm"
+                              title="Beddel Kaamirada (Switch Camera)"
+                            >
+                              <RotateCw className="h-3.5 w-3.5" />
+                              {facingMode === 'environment' ? 'Camera Dambe' : 'Camera Hore'}
+                            </button>
                           </>
                         )}
                       </div>

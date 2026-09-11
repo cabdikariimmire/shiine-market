@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { 
@@ -37,7 +37,7 @@ export default function ProductDetailPage() {
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
   const [movements, setMovements] = useState<StockMovement[]>([]);
 
-  const loadProduct = async () => {
+  const loadProduct = useCallback(async () => {
     try {
       const p = await repository.getProductById(productId);
       if (p) {
@@ -51,13 +51,13 @@ export default function ProductDetailPage() {
     } catch (err) {
       console.error('Error loading product detail:', err);
     }
-  };
+  }, [productId]);
 
   useEffect(() => {
     if (productId) {
       loadProduct();
     }
-  }, [productId]);
+  }, [productId, loadProduct]);
 
   const handleSelectVariant = async (v: ProductVariant) => {
     setSelectedVariant(v);

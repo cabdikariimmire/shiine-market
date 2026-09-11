@@ -30,6 +30,7 @@ export interface CartItem {
   product: Product;
   variant: ProductVariant;
   quantity: number; // in selling unit (supports decimals e.g. 1.25 kg)
+  quantityInput?: string; // string representation during manual typing
   unitPrice: number; // per selling unit
   unitCost: number; // cost per selling unit
   discount: number;
@@ -123,4 +124,43 @@ export interface ShopSettings {
   theme: 'light' | 'dark' | 'system';
   language: 'so';
   dateFormat: string;
+}
+
+export type ReportDateFilterType = 'today' | 'yesterday' | 'week' | 'month' | 'custom' | 'all';
+
+export interface ProductSalesReportRow {
+  variantId: string;
+  productId: string;
+  productName: string;
+  variantName: string;
+  sellingUnit: string;
+  quantitySold: number;
+  totalSales: number;
+  totalPaid: number;
+  totalDebt: number;
+  totalProfit: number;
+  transactionCount: number;
+}
+
+export interface ProductSaleTransactionDetail {
+  saleId: string;
+  saleCreatedAt: string;
+  customerName?: string;
+  paymentMethod: string;
+  quantity: number;
+  unit: string;
+  unitPrice: number;
+  totalPrice: number;
+  paidAmount: number;
+  debtAmount: number;
+  profit: number;
+}
+
+export interface ProductSalesReportSummary {
+  totalQuantity: number;
+  totalSales: number;
+  totalPaid: number;
+  totalDebt: number;
+  totalProfit: number;
+  uniqueProductsCount: number;
 }

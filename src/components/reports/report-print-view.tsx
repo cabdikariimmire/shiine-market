@@ -1,15 +1,19 @@
 'use client';
 
 import React from 'react';
-import { DashboardMetrics, ProfitReportRow, SalesReportRow, Debt, ProductVariant } from '@/types';
+import { DashboardMetrics, ProfitReportRow, SalesReportRow, ProductSalesReportRow, ProductSalesReportSummary, ReportDateFilterType } from '@/types';
 import { formatMoney } from '@/lib/calculations/financials';
 
 interface ReportPrintViewProps {
-  dateFilter: 'today' | 'yesterday' | 'last7' | 'month' | 'all';
-  activeReportTab: 'financial' | 'sales' | 'stock' | 'suppliers' | 'debts' | 'expenses';
+  dateFilter: ReportDateFilterType;
+  customStartDate?: string;
+  customEndDate?: string;
+  activeReportTab: 'product_sales' | 'financial' | 'sales' | 'stock' | 'suppliers' | 'debts' | 'expenses';
   metrics: DashboardMetrics | null;
   profitRows: ProfitReportRow[];
   salesRows: SalesReportRow[];
+  productSalesRows?: ProductSalesReportRow[];
+  productSalesSummary?: ProductSalesReportSummary | null;
   stockValuation: {
     totalCostValue: number;
     totalRetailValue: number;
@@ -23,10 +27,14 @@ interface ReportPrintViewProps {
 
 export function ReportPrintView({
   dateFilter,
+  customStartDate,
+  customEndDate,
   activeReportTab,
   metrics,
   profitRows,
   salesRows,
+  productSalesRows,
+  productSalesSummary,
   stockValuation,
   shopName = 'TUKAAN SHIINE SUPERMARKET',
   shopPhone = '+252 61 5500112',
@@ -38,10 +46,13 @@ export function ReportPrintView({
         return 'Maanta (Today)';
       case 'yesterday':
         return 'Shalay (Yesterday)';
+      case 'week':
       case 'last7':
-        return '7-dii Maalmood ee u Dambeeyey (Last 7 Days)';
+        return 'Toddobaadkan (This Week / Last 7 Days)';
       case 'month':
         return 'Bishan (Current Month)';
+      case 'custom':
+        return `Muddada: ${customStartDate || ''} - ${customEndDate || ''}`;
       case 'all':
         return 'Dhammaan Xogta (All Time)';
       default:
@@ -51,6 +62,8 @@ export function ReportPrintView({
 
   const getTabTitle = (tab: string) => {
     switch (tab) {
+      case 'product_sales':
+        return 'Warbixinta Iibka Alaabooyinka (Product Sales Report)';
       case 'financial':
         return "Warbixinta Faa'iidada & Xisaabaadka (Financial Profit & Loss)";
       case 'sales':
@@ -211,6 +224,99 @@ export function ReportPrintView({
       </div>
 
       {/* 5. ACTIVE DETAIL TABLE */}
+
+      {/* TAB 0: PRODUCT SALES REPORT TABLE */}
+      {activeReportTab === 'product_sales' && (
+        <div className="space-y-4">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-900 border-b border-slate-300 pb-1">
+            Iibka Alaab Kasta, Tirada, Dakhliga, Caddaan & Dayn (Product Sales Breakdown)
+          </h3>
+
+          {/* Product Sales KPI Summary */}
+          {productSalesSummary && (
+            <div className="grid grid-cols-5 gap-2">
+              <div className="border border-slate-300 rounded p-2 bg-slate-50">
+                <p className="text-[9px] font-bold text-slate-500 uppercase">Tirada Guud (Qty)</p>
+                <p className="text-sm font-black text-slate-900 font-mono">
+                  {productSalesSummary.totalQuantity}
+                </p>
+                <p className="text-[8px] text-slate-500">{productSalesSummary.uniqueProductsCount} nooc oo alaab ah</p>
+              </div>
+              <div className="border border-slate-300 rounded p-2 bg-slate-50">
+                <p className="text-[9px] font-bold text-slate-500 uppercase">Wadarta Iibka</p>
+                <p className="text-sm font-black text-slate-900 font-mono">
+                  {formatMoney(productSalesSummary.totalSales)}
+                </p>
+              </div>
+              <div className="border border-slate-300 rounded p-2 bg-slate-50">
+                <p className="text-[9px] font-bold text-emerald-800 uppercase">Caddaan La Helay</p>
+                <p className="text-sm font-black text-emerald-700 font-mono">
+                  {formatMoney(productSalesSummary.totalPaid)}
+                </p>
+              </div>
+              <div className="border border-slate-300 rounded p-2 bg-slate-50">
+                <p className="text-[9px] font-bold text-amber-800 uppercase">Dayn Ka Dhalatay</p>
+                <p className="text-sm font-black text-amber-700 font-mono">
+                  {formatMoney(productSalesSummary.totalDebt)}
+                </p>
+              </div>
+              <div className="border border-slate-300 rounded p-2 bg-slate-50">
+                <p className="text-[9px] font-bold text-purple-800 uppercase">Faa'iidada (Profit)</p>
+                <p className="text-sm font-black text-purple-700 font-mono">
+                  +{formatMoney(productSalesSummary.totalProfit)}
+                </p>
+              </div>
+            </div>
+          )}
+
+          <table className="w-full text-left text-xs border border-slate-300 border-collapse">
+            <thead>
+              <tr className="bg-slate-100 text-slate-900 font-bold border-b border-slate-300">
+                <th className="p-2 border-r border-slate-300">Alaabta (Product)</th>
+                <th className="p-2 border-r border-slate-300">Variant</th>
+                <th className="p-2 text-center border-r border-slate-300">Halbeeg (Unit)</th>
+                <th className="p-2 text-right border-r border-slate-300">Tirada (Qty)</th>
+                <th className="p-2 text-right border-r border-slate-300">Iibka Guud</th>
+                <th className="p-2 text-right border-r border-slate-300">La Bixiyey (Paid)</th>
+                <th className="p-2 text-right border-r border-slate-300">Dayn (Debt)</th>
+                <th className="p-2 text-right">Faa'iido (Profit)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(!productSalesRows || productSalesRows.length === 0) ? (
+                <tr>
+                  <td colSpan={8} className="p-4 text-center text-slate-400">
+                    Xog laguma helin muddadan
+                  </td>
+                </tr>
+              ) : (
+                productSalesRows.map((r, i) => (
+                  <tr key={i} className="border-b border-slate-200">
+                    <td className="p-2 font-bold border-r border-slate-200">{r.productName}</td>
+                    <td className="p-2 text-slate-600 border-r border-slate-200">{r.variantName || '-'}</td>
+                    <td className="p-2 text-center font-mono border-r border-slate-200">{r.sellingUnit}</td>
+                    <td className="p-2 text-right font-mono font-bold border-r border-slate-200">{r.quantitySold} {r.sellingUnit}</td>
+                    <td className="p-2 text-right font-mono font-bold border-r border-slate-200">{formatMoney(r.totalSales)}</td>
+                    <td className="p-2 text-right font-mono font-bold text-emerald-800 border-r border-slate-200">{formatMoney(r.totalPaid)}</td>
+                    <td className="p-2 text-right font-mono text-amber-700 border-r border-slate-200">{formatMoney(r.totalDebt)}</td>
+                    <td className="p-2 text-right font-mono font-black text-purple-800">+{formatMoney(r.totalProfit)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+            <tfoot>
+              <tr className="bg-slate-200 font-bold border-t-2 border-slate-400">
+                <td colSpan={3} className="p-2 font-black border-r border-slate-300">WADARTA GUUD (TOTALS):</td>
+                <td className="p-2 text-right font-mono font-black border-r border-slate-300">{productSalesSummary?.totalQuantity || 0}</td>
+                <td className="p-2 text-right font-mono font-black border-r border-slate-300">{formatMoney(productSalesSummary?.totalSales || 0)}</td>
+                <td className="p-2 text-right font-mono font-black text-emerald-800 border-r border-slate-300">{formatMoney(productSalesSummary?.totalPaid || 0)}</td>
+                <td className="p-2 text-right font-mono font-bold text-amber-700 border-r border-slate-300">{formatMoney(productSalesSummary?.totalDebt || 0)}</td>
+                <td className="p-2 text-right font-mono font-black text-purple-800">+{formatMoney(productSalesSummary?.totalProfit || 0)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
 
       {/* TAB 1: FINANCIAL PROFIT BREAKDOWN TABLE */}
       {activeReportTab === 'financial' && (

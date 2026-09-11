@@ -67,6 +67,18 @@ export function Header({ onMenuToggle, title = "Tukaan Dashboard", lowStockCount
               </Button>
             </Link>
           </>
+        ) : role === 'seller' ? (
+          <div className="flex items-center gap-2">
+            <span className="hidden sm:flex items-center gap-1 px-3 py-1 bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300 border border-amber-200 dark:border-amber-800 rounded-full text-xs font-bold">
+              <ShoppingCart className="h-3.5 w-3.5" /> Seller / Iibiye (POS)
+            </span>
+            <Link href="/sales/new">
+              <Button size="sm" className="flex items-center gap-2 font-bold px-4 shadow-md shadow-emerald-600/25">
+                <ShoppingCart className="h-4 w-4" />
+                <span>Iibka POS</span>
+              </Button>
+            </Link>
+          </div>
         ) : (
           <div className="flex items-center gap-2">
             <span className="hidden sm:flex items-center gap-1 px-3 py-1 bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300 border border-blue-200 dark:border-blue-800 rounded-full text-xs font-bold">

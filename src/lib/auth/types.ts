@@ -1,4 +1,4 @@
-export type UserRole = 'admin' | 'reporter';
+export type UserRole = 'admin' | 'reporter' | 'seller';
 export type UserStatus = 'active' | 'inactive';
 
 export interface SystemUser {

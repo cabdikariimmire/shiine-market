@@ -25,6 +25,13 @@ const REPORTER_ALLOWED_PREFIXES = [
   '/login'
 ];
 
+// Routes allowed for Seller (POS Only)
+const SELLER_ALLOWED_PREFIXES = [
+  '/sales/new',
+  '/sales',
+  '/login'
+];
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -33,18 +40,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const fetchProfileForUser = async (authUserId: string, authUserEmail: string, userMetadata?: any): Promise<SystemUser> => {
     try {
-      const { data: profile, error } = await supabase
+      // 3.5s timeout race so profile lookup never hangs the UI
+      const profilePromise = supabase
         .from('profiles')
         .select('*')
         .eq('id', authUserId)
         .maybeSingle();
 
+      const timeoutPromise = new Promise<{ data: null; error: { message: string } }>((resolve) =>
+        setTimeout(() => resolve({ data: null, error: { message: 'Profile query timed out' } }), 3500)
+      );
+
+      const { data: profile, error } = await Promise.race([profilePromise, timeoutPromise]);
+
       if (profile && !error) {
+        const roleStr = String(profile.role || '').toLowerCase();
+        const role: UserRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
+
         return {
           id: profile.id,
           name: profile.full_name || authUserEmail.split('@')[0] || 'User',
           email: authUserEmail,
-          role: (profile.role === 'reporter' ? 'reporter' : 'admin') as UserRole,
+          role,
           status: 'active',
           created_at: profile.created_at || new Date().toISOString(),
         };
@@ -53,10 +70,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.warn('Profile fetch notice:', err);
     }
 
+    const metaRole = String(userMetadata?.role || '').toLowerCase();
     const assignedRole: UserRole = 
-      userMetadata?.role === 'reporter' || authUserEmail.toLowerCase().includes('reporter') 
+      metaRole === 'reporter' || authUserEmail.toLowerCase().includes('reporter') 
         ? 'reporter' 
-        : 'admin';
+        : (metaRole === 'seller' || authUserEmail.toLowerCase().includes('seller') ? 'seller' : 'admin');
 
     return {
       id: authUserId,
@@ -80,9 +98,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const initAuth = async () => {
       try {
-        const { data, error } = await supabase.auth.getSession();
+        const getSessionPromise = supabase.auth.getSession();
+        const timeoutPromise = new Promise<{ data: { session: null }; error: null }>((resolve) =>
+          setTimeout(() => resolve({ data: { session: null }, error: null }), 4000)
+        );
+
+        const { data, error } = await Promise.race([getSessionPromise, timeoutPromise]);
         if (error) {
-          console.warn('Supabase getSession error:', error.message);
+          console.warn('Supabase getSession notice:', error.message);
         }
 
         const session = data?.session;
@@ -152,6 +175,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return REPORTER_ALLOWED_PREFIXES.some(prefix => path === prefix || path.startsWith(`${prefix}/`));
     }
 
+    // Seller permissions (POS Only)
+    if (user.role === 'seller') {
+      return SELLER_ALLOWED_PREFIXES.some(prefix => path === prefix || path.startsWith(`${prefix}/`));
+    }
+
     return false;
   }, [user]);
 
@@ -167,12 +195,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (user && isLoginPage) {
-      router.replace('/dashboard');
+      const targetUrl = user.role === 'seller' ? '/sales/new' : '/dashboard';
+      router.replace(targetUrl);
       return;
     }
 
     if (user && user.role === 'reporter' && !canAccess(pathname)) {
       router.replace('/dashboard');
+      return;
+    }
+
+    if (user && user.role === 'seller' && !canAccess(pathname)) {
+      router.replace('/sales/new');
+      return;
     }
   }, [user, isLoading, pathname, router, canAccess]);
 
@@ -181,7 +216,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!isSupabaseConfigured) {
         return { 
           success: false, 
-          error: 'Habaynta Supabase (Environment variables) ayaa ka maqan Vercel. Fadlan hubi Vercel Environment Variables.' 
+          error: 'Habaynta Supabase (Environment variables) ayaa ka maqan Vercel. Fadlan hubi NEXT_PUBLIC_SUPABASE_URL iyo NEXT_PUBLIC_SUPABASE_ANON_KEY.' 
         };
       }
 
@@ -189,10 +224,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return { success: false, error: 'Fadlan geli furaha sirta ah (Password required)' };
       }
 
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email: email.trim(),
+      const cleanEmail = email.trim().toLowerCase();
+
+      // Guard signInWithPassword with an 8-second timeout race
+      const signInPromise = supabase.auth.signInWithPassword({
+        email: cleanEmail,
         password,
       });
+
+      const timeoutPromise = new Promise<{ data: { user: null; session: null }; error: { message: string } }>((resolve) => {
+        setTimeout(() => {
+          resolve({
+            data: { user: null, session: null },
+            error: { message: 'Xiriirka Supabase wuu daahay (Request timed out). Fadlan hubi xiriirka internet-kaaga ama dib u tijaabi.' }
+          });
+        }, 8000);
+      });
+
+      const { data, error } = await Promise.race([signInPromise, timeoutPromise]);
 
       if (error || !data.user) {
         return { 
@@ -203,7 +252,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       const sysUser = await fetchProfileForUser(
         data.user.id,
-        data.user.email || email,
+        data.user.email || cleanEmail,
         data.user.user_metadata
       );
 
@@ -212,7 +261,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (err: any) {
       return { 
         success: false, 
-        error: err.message || 'Khalad baa dhacay intii lagu jiray galitaanka' 
+        error: err?.message || 'Khalad baa dhacay intii lagu jiray galitaanka' 
       };
     }
   };

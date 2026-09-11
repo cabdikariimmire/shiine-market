@@ -29,11 +29,15 @@ import {
   DebtPaymentCorrectionPayload,
   StockAdjustmentPayload,
   PaymentMethod,
-  InvoiceScanResult
+  InvoiceScanResult,
+  ProductSalesReportRow,
+  ProductSaleTransactionDetail,
+  ProductSalesReportSummary,
+  ReportDateFilterType
 } from '@/types';
 import { calculateCostPerBaseUnit, calculateMinSellableQty } from '@/lib/calculations/stock';
 import { generateId } from '@/lib/utils';
-import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+import { supabase, isSupabaseConfigured, supabaseUrl, supabaseAnonKey } from '@/lib/supabase/client';
 
 const DEFAULT_SETTINGS: ShopSettings = {
   shopName: 'Tukaan Shiine Supermarket',
@@ -65,17 +69,26 @@ class ShopRepository {
       const { data: { user }, error } = await supabase.auth.getUser();
       if (error || !user) return null;
 
-      const { data: profile } = await supabase
+      const profilePromise = supabase
         .from('profiles')
         .select('*')
         .eq('id', user.id)
         .maybeSingle();
 
+      const timeoutPromise = new Promise<{ data: null }>((resolve) =>
+        setTimeout(() => resolve({ data: null }), 3500)
+      );
+
+      const { data: profile } = await Promise.race([profilePromise, timeoutPromise]);
+
+      const roleStr = String(profile?.role || user.user_metadata?.role || '').toLowerCase();
+      const role: UserRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
+
       return {
         id: user.id,
         name: profile?.full_name || user.user_metadata?.full_name || user.email?.split('@')[0] || 'User',
         email: user.email || '',
-        role: (profile?.role === 'reporter' ? 'reporter' : 'admin') as UserRole,
+        role,
         status: 'active',
         created_at: profile?.created_at || user.created_at,
       };
@@ -90,8 +103,14 @@ class ShopRepository {
     if (!user) {
       throw new Error('Fadlan marka hore gal nidaamka (Not Authenticated)');
     }
+    if (user.role === 'seller') {
+      throw new Error(`Hawshan (${actionName}) waxaa u fasaxan kaliya Maamulaha (Admin). Seller / Iibiye wuxuu galayaa kaliya POS / Iibka.`);
+    }
     if (user.role === 'reporter') {
       throw new Error(`Hawshan (${actionName}) waxaa u fasaxan kaliya Maamulaha (Admin). Reporter waa Akhris-Kaliya (Read-Only).`);
+    }
+    if (user.role !== 'admin') {
+      throw new Error(`Hawshan (${actionName}) waxaa u fasaxan kaliya Maamulaha (Admin).`);
     }
     if (user.status !== 'active') {
       throw new Error('Koontadaadu ma firfircoona (Inactive)');
@@ -568,7 +587,16 @@ class ShopRepository {
   }
 
   public async createCustomer(data: { name: string; phone: string; address?: string; notes?: string }, reason?: string): Promise<Customer> {
-    await this.checkAdminAuth('Ku darid Macmiil Cusub');
+    const user = await this.getCurrentUser();
+    if (!user) {
+      throw new Error('Fadlan marka hore gal nidaamka (Not Authenticated)');
+    }
+    if (user.role === 'reporter') {
+      throw new Error('Hawshan waxaa u fasaxan kaliya Admin iyo Seller. Reporter waa Akhris-Kaliya (Read-Only).');
+    }
+    if (user.status !== 'active') {
+      throw new Error('Koontadaadu ma firfircoona (Inactive)');
+    }
 
     const newCust = {
       id: generateId(),
@@ -920,27 +948,56 @@ class ShopRepository {
     const { data: prev } = await supabase.from('product_variants').select('*').eq('id', id).single();
     if (!prev) throw new Error('Variant not found');
 
-    if (updates.productName || updates.categoryId !== undefined) {
-      await supabase.from('products').update({
-        ...(updates.productName ? { name: updates.productName.trim() } : {}),
-        ...(updates.categoryId !== undefined ? { category_id: updates.categoryId || null } : {}),
+    if (updates.productName || updates.categoryId !== undefined || updates.category_id !== undefined) {
+      const rawCatId = updates.categoryId !== undefined ? updates.categoryId : updates.category_id;
+      const cleanCatId = (rawCatId && typeof rawCatId === 'string' && rawCatId.trim().length > 0) ? rawCatId.trim() : null;
+
+      const productUpdates: any = {
         updated_at: new Date().toISOString(),
-      }).eq('id', prev.product_id);
+      };
+      if (updates.productName && typeof updates.productName === 'string' && updates.productName.trim()) {
+        productUpdates.name = updates.productName.trim();
+      }
+      if (updates.categoryId !== undefined || updates.category_id !== undefined) {
+        productUpdates.category_id = cleanCatId;
+      }
+
+      const { error: prodErr } = await supabase
+        .from('products')
+        .update(productUpdates)
+        .eq('id', prev.product_id);
+
+      if (prodErr) {
+        throw new Error(`Khalad beddelka alaabta: ${prodErr.message}`);
+      }
     }
 
+    const rawSuppId = updates.supplier_id !== undefined ? updates.supplier_id : updates.supplierId;
+    let cleanSupplierId: string | null = prev.supplier_id || null;
+    if (rawSuppId !== undefined) {
+      cleanSupplierId = (rawSuppId && typeof rawSuppId === 'string' && rawSuppId.trim().length > 0) ? rawSuppId.trim() : null;
+    }
+
+    const division = updates.unit_division !== undefined ? Math.max(1, Number(updates.unit_division) || 1) : (updates.unitDivision !== undefined ? Math.max(1, Number(updates.unitDivision) || 1) : Math.max(1, Number(prev.unit_division) || 1));
+    const minSellable = updates.min_sellable_qty !== undefined && Number(updates.min_sellable_qty) > 0
+      ? Number(updates.min_sellable_qty)
+      : (updates.minSellableQty !== undefined && Number(updates.minSellableQty) > 0
+        ? Number(updates.minSellableQty)
+        : (prev.min_sellable_qty ? Number(prev.min_sellable_qty) : calculateMinSellableQty(division)));
+
     const variantUpdates: any = {
-      variant_name: updates.variant_name || updates.variantName || prev.variant_name,
-      sku: updates.sku !== undefined ? updates.sku : prev.sku,
-      barcode: updates.barcode !== undefined ? updates.barcode : prev.barcode,
-      buy_price: updates.buy_price !== undefined ? updates.buy_price : (updates.buyPrice !== undefined ? updates.buyPrice : prev.buy_price),
-      purchase_unit: updates.purchase_unit || updates.purchaseUnit || prev.purchase_unit,
-      sell_price: updates.sell_price !== undefined ? updates.sell_price : (updates.sellPrice !== undefined ? updates.sellPrice : prev.sell_price),
-      selling_unit: updates.selling_unit || updates.sellingUnit || prev.selling_unit,
-      conversion_factor: updates.conversion_factor !== undefined ? updates.conversion_factor : (updates.conversionFactor !== undefined ? updates.conversionFactor : prev.conversion_factor),
-      unit_division: updates.unit_division !== undefined ? updates.unit_division : (updates.unitDivision !== undefined ? updates.unitDivision : (prev.unit_division || 1)),
-      min_sellable_qty: updates.min_sellable_qty !== undefined ? updates.min_sellable_qty : (updates.minSellableQty !== undefined ? updates.minSellableQty : (prev.min_sellable_qty || calculateMinSellableQty(updates.unit_division || updates.unitDivision || prev.unit_division || 1))),
-      minimum_stock: updates.minimum_stock !== undefined ? updates.minimum_stock : (updates.minimumStock !== undefined ? updates.minimumStock : prev.minimum_stock),
-      supplier_id: updates.supplier_id !== undefined ? updates.supplier_id : (updates.supplierId !== undefined ? updates.supplierId : prev.supplier_id),
+      variant_name: (updates.variant_name || updates.variantName || prev.variant_name || '').trim(),
+      sku: updates.sku !== undefined ? (typeof updates.sku === 'string' && updates.sku.trim() ? updates.sku.trim() : null) : (prev.sku || null),
+      barcode: updates.barcode !== undefined ? (typeof updates.barcode === 'string' && updates.barcode.trim() ? updates.barcode.trim() : null) : (prev.barcode || null),
+      buy_price: updates.buy_price !== undefined ? Number(updates.buy_price) : (updates.buyPrice !== undefined ? Number(updates.buyPrice) : Number(prev.buy_price || 0)),
+      purchase_unit: updates.purchase_unit || updates.purchaseUnit || prev.purchase_unit || 'jawan',
+      sell_price: updates.sell_price !== undefined ? Number(updates.sell_price) : (updates.sellPrice !== undefined ? Number(updates.sellPrice) : Number(prev.sell_price || 0)),
+      selling_unit: updates.selling_unit || updates.sellingUnit || prev.selling_unit || 'kg',
+      conversion_factor: updates.conversion_factor !== undefined ? Number(updates.conversion_factor) : (updates.conversionFactor !== undefined ? Number(updates.conversionFactor) : Number(prev.conversion_factor || 1)),
+      unit_division: division,
+      min_sellable_qty: minSellable,
+      minimum_stock: updates.minimum_stock !== undefined ? Number(updates.minimum_stock) : (updates.minimumStock !== undefined ? Number(updates.minimumStock) : Number(prev.minimum_stock || 0)),
+      supplier_id: cleanSupplierId,
       updated_at: new Date().toISOString(),
     };
 
@@ -948,7 +1005,7 @@ class ShopRepository {
       .from('product_variants')
       .update(variantUpdates)
       .eq('id', id)
-      .select('*, product:products(*)')
+      .select('*, product:products(*, category:categories(*)), supplier:suppliers(*)')
       .single();
 
     if (error && (error.message?.includes('min_sellable_qty') || error.message?.includes('unit_division') || error.code === 'PGRST204')) {
@@ -958,7 +1015,7 @@ class ShopRepository {
         .from('product_variants')
         .update(fallbackUpdates)
         .eq('id', id)
-        .select('*, product:products(*)')
+        .select('*, product:products(*, category:categories(*)), supplier:suppliers(*)')
         .single();
       if (!retryRes.error && retryRes.data) {
         updated = { ...retryRes.data, unit_division, min_sellable_qty };
@@ -1212,9 +1269,10 @@ class ShopRepository {
     if (!variant) throw new Error('Variant not found');
 
     if (variant.product_id) {
+      const cleanCatId = data.categoryId && typeof data.categoryId === 'string' && data.categoryId.trim().length > 0 ? data.categoryId.trim() : null;
       await supabase.from('products').update({
         name: data.productName.trim(),
-        category_id: data.categoryId || null,
+        category_id: cleanCatId,
         updated_at: new Date().toISOString(),
       }).eq('id', variant.product_id);
     }
@@ -1227,6 +1285,7 @@ class ShopRepository {
     const addedQty = Number(((Number(data.quantityToAdd || 0)) * (Number(data.conversionFactor) || 1)).toFixed(4));
     const prevStock = Number(variant.stock_quantity || 0);
     const newStock = Number((prevStock + addedQty).toFixed(4));
+    const cleanSuppId = data.supplierId && typeof data.supplierId === 'string' && data.supplierId.trim().length > 0 ? data.supplierId.trim() : null;
 
     const finalizePayload: any = {
       variant_name: data.variantName.trim(),
@@ -1241,7 +1300,7 @@ class ShopRepository {
       min_sellable_qty: minSellable,
       stock_quantity: newStock,
       minimum_stock: Number(data.minimumStock || 10),
-      supplier_id: data.supplierId || null,
+      supplier_id: cleanSuppId,
       is_pending: false,
       is_active: true,
       updated_at: new Date().toISOString(),
@@ -1471,16 +1530,19 @@ class ShopRepository {
     let costAmount = 0;
 
     for (const item of rawItems) {
-      const lineSubtotal = item.quantity * item.unitPrice - (item.discount || 0);
+      const lineSubtotal = Math.round((item.quantity * item.unitPrice - (item.discount || 0)) * 100) / 100;
       subtotal += lineSubtotal;
-      costAmount += item.quantity * item.unitCost;
+      costAmount += Math.round(item.quantity * item.unitCost * 100) / 100;
     }
 
+    subtotal = Math.round(subtotal * 100) / 100;
+    costAmount = Math.round(costAmount * 100) / 100;
+
     const discount = Number(params.overallDiscount || 0);
-    const totalAmount = Math.max(0, subtotal - discount);
+    const totalAmount = Math.max(0, Math.round((subtotal - discount) * 100) / 100);
     const amountPaid = params.paymentMethod === 'cash' ? totalAmount : Math.min(totalAmount, Math.max(0, Number(params.amountPaid || 0)));
-    const debtAmount = Math.max(0, totalAmount - amountPaid);
-    const grossProfit = totalAmount - costAmount;
+    const debtAmount = Math.max(0, Math.round((totalAmount - amountPaid) * 100) / 100);
+    const grossProfit = Math.round((totalAmount - costAmount) * 100) / 100;
 
     const saleId = generateId();
 
@@ -1508,8 +1570,8 @@ class ShopRepository {
     }
 
     for (const item of rawItems) {
-      const itemLineTotal = item.quantity * item.unitPrice - (item.discount || 0);
-      const itemProfit = itemLineTotal - (item.quantity * item.unitCost);
+      const itemLineTotal = Math.round((item.quantity * item.unitPrice - (item.discount || 0)) * 100) / 100;
+      const itemProfit = Math.round((itemLineTotal - (item.quantity * item.unitCost)) * 100) / 100;
 
       await supabase.from('sale_items').insert([{
         id: generateId(),
@@ -2392,14 +2454,18 @@ class ShopRepository {
       return [];
     }
 
-    return (data || []).map(p => ({
-      id: p.id,
-      name: p.full_name,
-      email: p.phone ? `${p.phone}@tukaan.so` : `${p.full_name.toLowerCase().replace(/\s+/g, '')}@tukaan.so`,
-      role: (p.role === 'reporter' ? 'reporter' : 'admin') as UserRole,
-      status: 'active',
-      created_at: p.created_at,
-    }));
+    return (data || []).map(p => {
+      const roleStr = String(p.role || '').toLowerCase();
+      const role: UserRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
+      return {
+        id: p.id,
+        name: p.full_name,
+        email: p.phone ? `${p.phone}@tukaan.so` : `${p.full_name.toLowerCase().replace(/\s+/g, '')}@tukaan.so`,
+        role,
+        status: 'active',
+        created_at: p.created_at,
+      };
+    });
   }
 
   public async getUserById(id: string): Promise<SystemUser | null> {
@@ -2410,11 +2476,13 @@ class ShopRepository {
       .maybeSingle();
 
     if (error || !data) return null;
+    const roleStr = String(data.role || '').toLowerCase();
+    const role: UserRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
     return {
       id: data.id,
       name: data.full_name,
       email: data.phone || 'user@tukaan.so',
-      role: (data.role === 'reporter' ? 'reporter' : 'admin') as UserRole,
+      role,
       status: 'active',
       created_at: data.created_at,
     };
@@ -2429,11 +2497,13 @@ class ShopRepository {
       .maybeSingle();
 
     if (error || !data) return null;
+    const roleStr = String(data.role || '').toLowerCase();
+    const role: UserRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
     return {
       id: data.id,
       name: data.full_name,
       email: email,
-      role: (data.role === 'reporter' ? 'reporter' : 'admin') as UserRole,
+      role,
       status: 'active',
       created_at: data.created_at,
     };
@@ -2442,19 +2512,53 @@ class ShopRepository {
   public async createUser(data: { name: string; email: string; role: UserRole; password?: string }, reason?: string): Promise<SystemUser> {
     await this.checkAdminAuth('Abuuris Isticmaale Cusub');
 
-    const userId = generateId();
+    let authUserId = generateId();
+
+    // If Supabase is configured and password is provided, provision in Supabase Auth using ephemeral client (so active admin session is preserved)
+    if (isSupabaseConfigured && data.password) {
+      try {
+        const { createClient } = await import('@supabase/supabase-js');
+        const ephemeralClient = createClient(supabaseUrl, supabaseAnonKey, {
+          auth: {
+            persistSession: false,
+            autoRefreshToken: false,
+            detectSessionInUrl: false,
+          },
+        });
+
+        const { data: authData, error: authErr } = await ephemeralClient.auth.signUp({
+          email: data.email.trim(),
+          password: data.password,
+          options: {
+            data: {
+              full_name: data.name.trim(),
+              role: data.role,
+            },
+          },
+        });
+
+        if (authErr) {
+          console.warn('Supabase auth signUp warning during createUser:', authErr.message);
+        } else if (authData.user?.id) {
+          authUserId = authData.user.id;
+        }
+      } catch (authException) {
+        console.warn('Auth provision exception:', authException);
+      }
+    }
+
     const newProfile = {
-      id: userId,
+      id: authUserId,
       full_name: data.name.trim(),
-      role: data.role === 'reporter' ? 'reporter' : 'admin',
-      phone: data.email,
+      role: data.role,
+      phone: data.email.trim(),
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
 
     const { data: created, error } = await supabase
       .from('profiles')
-      .insert([newProfile])
+      .upsert([newProfile])
       .select()
       .single();
 
@@ -2465,17 +2569,20 @@ class ShopRepository {
     await this.recordAuditLog(
       'CREATE_USER',
       'profile',
-      userId,
+      authUserId,
       undefined,
       created,
       reason || `Abuuris User: ${created.full_name} (${created.role})`
     );
 
+    const roleStr = String(created.role || data.role).toLowerCase();
+    const resolvedRole: UserRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
+
     return {
       id: created.id,
       name: created.full_name,
       email: data.email,
-      role: data.role,
+      role: resolvedRole,
       status: 'active',
       created_at: created.created_at,
     };
@@ -2510,11 +2617,14 @@ class ShopRepository {
       reason || `Wax ka beddel User: ${updated.full_name}`
     );
 
+    const roleStr = String(updated.role || '').toLowerCase();
+    const resolvedRole: UserRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
+
     return {
       id: updated.id,
       name: updated.full_name,
       email: updates.email || prev?.phone || 'user@tukaan.so',
-      role: (updated.role === 'reporter' ? 'reporter' : 'admin') as UserRole,
+      role: resolvedRole,
       status: 'active',
       created_at: updated.created_at,
     };
@@ -2556,6 +2666,11 @@ class ShopRepository {
   // DASHBOARD METRICS & REPORTS (Live Supabase Aggregate)
   // ==========================================
   public async getDashboardMetrics(period: 'today' | 'yesterday' | 'month' | 'all' = 'today'): Promise<DashboardMetrics> {
+    const user = await this.getCurrentUser();
+    if (user?.role === 'seller') {
+      throw new Error('Seller / Iibiye ma laha ogolaansho uu ku eego warbixinnada Dashboard-ka.');
+    }
+
     const now = new Date();
     const todayStr = now.toISOString().split('T')[0];
     
@@ -2650,6 +2765,11 @@ class ShopRepository {
   }
 
   public async getSalesReport(): Promise<SalesReportRow[]> {
+    const user = await this.getCurrentUser();
+    if (user?.role === 'seller') {
+      throw new Error('Seller / Iibiye ma laha ogolaansho uu ku eego warbixinnada iibka.');
+    }
+
     const { data: sales, error } = await supabase
       .from('sales')
       .select('created_at, total_amount, amount_paid, debt_amount, discount')
@@ -2683,6 +2803,11 @@ class ShopRepository {
   }
 
   public async getProfitReport(): Promise<ProfitReportRow[]> {
+    const user = await this.getCurrentUser();
+    if (user?.role === 'seller') {
+      throw new Error('Seller / Iibiye ma laha ogolaansho uu ku eego warbixinnada faa\'iidada.');
+    }
+
     const [salesRes, expensesRes] = await Promise.all([
       supabase.from('sales').select('created_at, total_amount, cost_amount, gross_profit, amount_paid'),
       supabase.from('expenses').select('date, amount'),
@@ -2733,6 +2858,279 @@ class ShopRepository {
     }
 
     return Object.values(grouped).sort((a, b) => b.date.localeCompare(a.date));
+  }
+
+  /**
+   * Helper to build date range boundaries for report queries
+   */
+  private buildReportDateRange(
+    period: ReportDateFilterType = 'today',
+    customStartDate?: string,
+    customEndDate?: string
+  ): { startDateIso?: string; endDateIso?: string } {
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+    if (period === 'today') {
+      return {
+        startDateIso: `${todayStr}T00:00:00`,
+        endDateIso: `${todayStr}T23:59:59.999`,
+      };
+    } else if (period === 'yesterday') {
+      const yest = new Date(now);
+      yest.setDate(now.getDate() - 1);
+      const yesterdayStr = `${yest.getFullYear()}-${String(yest.getMonth() + 1).padStart(2, '0')}-${String(yest.getDate()).padStart(2, '0')}`;
+      return {
+        startDateIso: `${yesterdayStr}T00:00:00`,
+        endDateIso: `${yesterdayStr}T23:59:59.999`,
+      };
+    } else if (period === 'week') {
+      const weekStart = new Date(now);
+      weekStart.setDate(now.getDate() - 6);
+      const weekStartStr = `${weekStart.getFullYear()}-${String(weekStart.getMonth() + 1).padStart(2, '0')}-${String(weekStart.getDate()).padStart(2, '0')}`;
+      return {
+        startDateIso: `${weekStartStr}T00:00:00`,
+        endDateIso: `${todayStr}T23:59:59.999`,
+      };
+    } else if (period === 'month') {
+      const monthStartStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+      return {
+        startDateIso: `${monthStartStr}T00:00:00`,
+        endDateIso: `${todayStr}T23:59:59.999`,
+      };
+    } else if (period === 'custom' && customStartDate) {
+      const startStr = customStartDate.split('T')[0];
+      const endStr = (customEndDate || customStartDate).split('T')[0];
+      return {
+        startDateIso: `${startStr}T00:00:00`,
+        endDateIso: `${endStr}T23:59:59.999`,
+      };
+    }
+
+    return {};
+  }
+
+  /**
+   * Product Sales Report: aggregates quantity sold, sales revenue, paid, debt, and profit per product variant
+   */
+  public async getProductSalesReport(
+    period: ReportDateFilterType = 'today',
+    customStartDate?: string,
+    customEndDate?: string,
+    searchQuery: string = ''
+  ): Promise<{ rows: ProductSalesReportRow[]; summary: ProductSalesReportSummary }> {
+    const user = await this.getCurrentUser();
+    if (user?.role === 'seller') {
+      throw new Error('Seller / Iibiye ma laha ogolaansho uu ku eego warbixinnada alaabta.');
+    }
+
+    const { startDateIso, endDateIso } = this.buildReportDateRange(period, customStartDate, customEndDate);
+
+    let query = supabase
+      .from('sales')
+      .select('id, created_at, payment_method, total_amount, amount_paid, debt_amount, items:sale_items(id, product_variant_id, quantity, unit, unit_price, unit_cost, discount, total_price, gross_profit, product_variant:product_variants(id, variant_name, selling_unit, product:products(id, name)))');
+
+    if (startDateIso) {
+      query = query.gte('created_at', startDateIso);
+    }
+    if (endDateIso) {
+      query = query.lte('created_at', endDateIso);
+    }
+
+    const { data: sales, error } = await query.order('created_at', { ascending: false });
+
+    if (error || !sales) {
+      console.error('Error fetching product sales report:', error);
+      return {
+        rows: [],
+        summary: { totalQuantity: 0, totalSales: 0, totalPaid: 0, totalDebt: 0, totalProfit: 0, uniqueProductsCount: 0 }
+      };
+    }
+
+    const productMap: Record<string, ProductSalesReportRow> = {};
+
+    for (const sale of sales) {
+      const saleTotal = Number(sale.total_amount || 0);
+      const salePaid = Number(sale.amount_paid || 0);
+      const saleDebt = Number(sale.debt_amount || 0);
+      const isCash = sale.payment_method === 'cash' || saleDebt === 0;
+      const isCredit = sale.payment_method === 'credit' || salePaid === 0;
+      const paidRatio = saleTotal > 0 ? (salePaid / saleTotal) : 1;
+
+      const items = (sale.items || []) as any[];
+
+      for (const item of items) {
+        const pv = Array.isArray(item.product_variant) ? item.product_variant[0] : item.product_variant;
+        const prod = pv?.product ? (Array.isArray(pv.product) ? pv.product[0] : pv.product) : undefined;
+        const variantId = item.product_variant_id || pv?.id;
+        if (!variantId) continue;
+
+        const pName = prod?.name || 'Alaab';
+        const vName = pv?.variant_name || '';
+        const unit = item.unit || pv?.selling_unit || 'KG';
+        const lineTotal = Math.round(Number(item.total_price || 0) * 100) / 100;
+        const lineQty = Number(Number(item.quantity || 0).toFixed(4));
+        const lineProfit = Math.round(Number(item.gross_profit || 0) * 100) / 100;
+
+        let itemPaid = 0;
+        let itemDebt = 0;
+        if (isCash) {
+          itemPaid = lineTotal;
+          itemDebt = 0;
+        } else if (isCredit) {
+          itemPaid = 0;
+          itemDebt = lineTotal;
+        } else {
+          itemPaid = Math.round(lineTotal * paidRatio * 100) / 100;
+          itemDebt = Math.round((lineTotal - itemPaid) * 100) / 100;
+        }
+
+        if (!productMap[variantId]) {
+          productMap[variantId] = {
+            variantId,
+            productId: prod?.id || '',
+            productName: pName,
+            variantName: vName,
+            sellingUnit: unit,
+            quantitySold: 0,
+            totalSales: 0,
+            totalPaid: 0,
+            totalDebt: 0,
+            totalProfit: 0,
+            transactionCount: 0,
+          };
+        }
+
+        productMap[variantId].quantitySold = Number((productMap[variantId].quantitySold + lineQty).toFixed(4));
+        productMap[variantId].totalSales = Math.round((productMap[variantId].totalSales + lineTotal) * 100) / 100;
+        productMap[variantId].totalPaid = Math.round((productMap[variantId].totalPaid + itemPaid) * 100) / 100;
+        productMap[variantId].totalDebt = Math.round((productMap[variantId].totalDebt + itemDebt) * 100) / 100;
+        productMap[variantId].totalProfit = Math.round((productMap[variantId].totalProfit + lineProfit) * 100) / 100;
+        productMap[variantId].transactionCount += 1;
+      }
+    }
+
+    let rows = Object.values(productMap);
+
+    if (searchQuery && searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      rows = rows.filter(r => 
+        r.productName.toLowerCase().includes(q) || 
+        r.variantName.toLowerCase().includes(q) ||
+        r.sellingUnit.toLowerCase().includes(q)
+      );
+    }
+
+    rows.sort((a, b) => b.totalSales - a.totalSales);
+
+    const summary: ProductSalesReportSummary = rows.reduce((acc, r) => ({
+      totalQuantity: Number((acc.totalQuantity + r.quantitySold).toFixed(4)),
+      totalSales: Math.round((acc.totalSales + r.totalSales) * 100) / 100,
+      totalPaid: Math.round((acc.totalPaid + r.totalPaid) * 100) / 100,
+      totalDebt: Math.round((acc.totalDebt + r.totalDebt) * 100) / 100,
+      totalProfit: Math.round((acc.totalProfit + r.totalProfit) * 100) / 100,
+      uniqueProductsCount: rows.length,
+    }), {
+      totalQuantity: 0,
+      totalSales: 0,
+      totalPaid: 0,
+      totalDebt: 0,
+      totalProfit: 0,
+      uniqueProductsCount: 0,
+    });
+
+    return { rows, summary };
+  }
+
+  /**
+   * Returns paginated individual transactions for a specific product variant in the selected period
+   */
+  public async getProductSaleTransactions(
+    variantId: string,
+    period: ReportDateFilterType = 'today',
+    customStartDate?: string,
+    customEndDate?: string,
+    page: number = 1,
+    pageSize: number = 20
+  ): Promise<PaginatedResult<ProductSaleTransactionDetail>> {
+    const user = await this.getCurrentUser();
+    if (user?.role === 'seller') {
+      throw new Error('Seller / Iibiye ma laha ogolaansho uu ku eego xogta faahfaahsan ee iibka.');
+    }
+
+    const { startDateIso, endDateIso } = this.buildReportDateRange(period, customStartDate, customEndDate);
+
+    let query = supabase
+      .from('sale_items')
+      .select('id, sale_id, quantity, unit, unit_price, total_price, gross_profit, created_at, sale:sales(id, created_at, payment_method, total_amount, amount_paid, debt_amount, customer:customers(name))', { count: 'exact' })
+      .eq('product_variant_id', variantId);
+
+    if (startDateIso) {
+      query = query.gte('created_at', startDateIso);
+    }
+    if (endDateIso) {
+      query = query.lte('created_at', endDateIso);
+    }
+
+    const from = (page - 1) * pageSize;
+    const to = from + pageSize - 1;
+
+    const { data: items, count, error } = await query
+      .order('created_at', { ascending: false })
+      .range(from, to);
+
+    if (error || !items) {
+      return { data: [], totalCount: 0, page, pageSize, totalPages: 1 };
+    }
+
+    const details: ProductSaleTransactionDetail[] = items.map((item: any) => {
+      const sale = item.sale || {};
+      const saleTotal = Number(sale.total_amount || 0);
+      const salePaid = Number(sale.amount_paid || 0);
+      const saleDebt = Number(sale.debt_amount || 0);
+      const isCash = sale.payment_method === 'cash' || saleDebt === 0;
+      const isCredit = sale.payment_method === 'credit' || salePaid === 0;
+      const paidRatio = saleTotal > 0 ? (salePaid / saleTotal) : 1;
+      const lineTotal = Math.round(Number(item.total_price || 0) * 100) / 100;
+
+      let itemPaid = 0;
+      let itemDebt = 0;
+      if (isCash) {
+        itemPaid = lineTotal;
+        itemDebt = 0;
+      } else if (isCredit) {
+        itemPaid = 0;
+        itemDebt = lineTotal;
+      } else {
+        itemPaid = Math.round(lineTotal * paidRatio * 100) / 100;
+        itemDebt = Math.round((lineTotal - itemPaid) * 100) / 100;
+      }
+
+      return {
+        saleId: item.sale_id || sale.id || '',
+        saleCreatedAt: sale.created_at || item.created_at || '',
+        customerName: sale.customer?.name || (sale.customer_id ? 'Macmiil' : 'Caddaan (Walk-in)'),
+        paymentMethod: sale.payment_method || 'cash',
+        quantity: Number(Number(item.quantity || 0).toFixed(4)),
+        unit: item.unit || 'KG',
+        unitPrice: Number(item.unit_price || 0),
+        totalPrice: lineTotal,
+        paidAmount: itemPaid,
+        debtAmount: itemDebt,
+        profit: Math.round(Number(item.gross_profit || 0) * 100) / 100,
+      };
+    });
+
+    const totalCount = count ?? details.length;
+    const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+
+    return {
+      data: details,
+      totalCount,
+      page,
+      pageSize,
+      totalPages,
+    };
   }
 }
 
