@@ -170,6 +170,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = async (email: string, password?: string) => {
     try {
+      if (!isSupabaseConfigured) {
+        return { 
+          success: false, 
+          error: 'Habaynta Supabase (Environment variables) ayaa ka maqan Vercel. Fadlan hubi Vercel Environment Variables.' 
+        };
+      }
+
       if (!password) {
         return { success: false, error: 'Fadlan geli furaha sirta ah (Password required)' };
       }
