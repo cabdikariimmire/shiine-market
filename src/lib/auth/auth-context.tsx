@@ -72,21 +72,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let isMounted = true;
 
+    if (!isSupabaseConfigured) {
+      setUser(null);
+      setIsLoading(false);
+      return;
+    }
+
     const initAuth = async () => {
       try {
-        if (!isSupabaseConfigured) {
-          if (isMounted) {
-            setUser(null);
-            setIsLoading(false);
-          }
-          return;
-        }
-
-        const { data: { session }, error } = await supabase.auth.getSession();
+        const { data, error } = await supabase.auth.getSession();
         if (error) {
           console.warn('Supabase getSession error:', error.message);
         }
 
+        const session = data?.session;
         if (session?.user && isMounted) {
           const sysUser = await fetchProfileForUser(
             session.user.id,
@@ -108,30 +107,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     initAuth();
 
     // Listen to real-time auth state changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (!isMounted) return;
+    let authListener: { data?: { subscription?: { unsubscribe: () => void } } } | null = null;
+    try {
+      authListener = supabase.auth.onAuthStateChange(async (event, session) => {
+        if (!isMounted) return;
 
-      if (session?.user) {
-        const sysUser = await fetchProfileForUser(
-          session.user.id,
-          session.user.email || '',
-          session.user.user_metadata
-        );
-        if (isMounted) {
-          setUser(sysUser);
-          setIsLoading(false);
+        if (session?.user) {
+          const sysUser = await fetchProfileForUser(
+            session.user.id,
+            session.user.email || '',
+            session.user.user_metadata
+          );
+          if (isMounted) {
+            setUser(sysUser);
+            setIsLoading(false);
+          }
+        } else {
+          if (isMounted) {
+            setUser(null);
+            setIsLoading(false);
+          }
         }
-      } else {
-        if (isMounted) {
-          setUser(null);
-          setIsLoading(false);
-        }
-      }
-    });
+      });
+    } catch (subErr) {
+      console.warn('onAuthStateChange registration notice:', subErr);
+    }
 
     return () => {
       isMounted = false;
-      subscription.unsubscribe();
+      try {
+        authListener?.data?.subscription?.unsubscribe();
+      } catch (unsubErr) {
+        console.warn('Auth unsubscribe notice:', unsubErr);
+      }
     };
   }, []);
 
