@@ -32,6 +32,7 @@ import { ReceiptModal } from '@/components/pos/receipt-modal';
 import { useToast } from '@/components/ui/toast';
 import { repository } from '@/lib/services/repository';
 import { calculateCartItemLine, calculateSaleTotal, formatMoney } from '@/lib/calculations/financials';
+import { calculateSosDenomination, formatSos } from '@/lib/calculations/denominations';
 import { 
   calculateCostPerBaseUnit, 
   calculateUnitProfit, 
@@ -112,11 +113,16 @@ export default function POSTerminalPage() {
   const updateCartItemQuantity = (variantId: string, quantity: number, quantityInput?: string) => {
     setCart(prev => prev.map(i => {
       if (i.variant.id === variantId) {
-        const line = calculateCartItemLine(i.unitPrice, i.unitCost, quantity, i.discount);
+        const pMode = i.pricing_mode || i.variant?.pricing_mode || 'fixed';
+        const sPrice = i.sosPrice ?? i.variant?.sos_price;
+        const line = calculateCartItemLine(i.unitPrice, i.unitCost, quantity, i.discount, pMode, sPrice);
         return {
           ...i,
           quantity,
           quantityInput: quantityInput !== undefined ? quantityInput : String(quantity),
+          pricing_mode: pMode,
+          sosPrice: sPrice,
+          sosTotal: line.sosTotal,
           totalPrice: line.totalPrice,
           grossProfit: line.grossProfit,
         };
@@ -160,23 +166,28 @@ export default function POSTerminalPage() {
     }
 
     const costPerBase = calculateCostPerBaseUnit(variant.buy_price, variant.conversion_factor);
+    const pMode = variant.pricing_mode || 'fixed';
+    const sPrice = variant.sos_price;
 
     setCart(prev => {
       if (existingIndex !== -1) {
         const existing = prev[existingIndex];
-        const line = calculateCartItemLine(existing.unitPrice, existing.unitCost, targetQty, existing.discount);
+        const line = calculateCartItemLine(existing.unitPrice, existing.unitCost, targetQty, existing.discount, pMode, sPrice);
 
         const updated = [...prev];
         updated[existingIndex] = {
           ...existing,
           quantity: targetQty,
           quantityInput: String(targetQty),
+          pricing_mode: pMode,
+          sosPrice: sPrice,
+          sosTotal: line.sosTotal,
           totalPrice: line.totalPrice,
           grossProfit: line.grossProfit,
         };
         return updated;
       } else {
-        const line = calculateCartItemLine(variant.sell_price, costPerBase, defaultAdd, 0);
+        const line = calculateCartItemLine(variant.sell_price, costPerBase, defaultAdd, 0, pMode, sPrice);
         return [
           ...prev,
           {
@@ -186,6 +197,9 @@ export default function POSTerminalPage() {
             quantityInput: String(defaultAdd),
             unitPrice: variant.sell_price,
             unitCost: costPerBase,
+            pricing_mode: pMode,
+            sosPrice: sPrice,
+            sosTotal: line.sosTotal,
             discount: 0,
             totalPrice: line.totalPrice,
             grossProfit: line.grossProfit,
@@ -249,11 +263,16 @@ export default function POSTerminalPage() {
     const cappedQty = Math.min(item.variant.stock_quantity, parsed);
     setCart(prev => prev.map(i => {
       if (i.variant.id === variantId) {
-        const line = calculateCartItemLine(i.unitPrice, i.unitCost, cappedQty, i.discount);
+        const pMode = i.pricing_mode || i.variant?.pricing_mode || 'fixed';
+        const sPrice = i.sosPrice ?? i.variant?.sos_price;
+        const line = calculateCartItemLine(i.unitPrice, i.unitCost, cappedQty, i.discount, pMode, sPrice);
         return {
           ...i,
           quantity: cappedQty,
           quantityInput: rawVal,
+          pricing_mode: pMode,
+          sosPrice: sPrice,
+          sosTotal: line.sosTotal,
           totalPrice: line.totalPrice,
           grossProfit: line.grossProfit,
         };
@@ -377,7 +396,7 @@ export default function POSTerminalPage() {
     }
 
     const numDiscount = parseFloat(overallDiscount) || 0;
-    const numPaid = parseFloat(amountPaidInput) || 0;
+    const numPaid = paymentMethod === 'cash' ? totals.totalAmount : (parseFloat(amountPaidInput) || 0);
 
     try {
       const sale = await repository.executeSale({
@@ -519,14 +538,29 @@ export default function POSTerminalPage() {
                     </div>
 
                     <div className="mt-3 pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
-                      <span className={`text-sm font-black font-mono ${isOutOfStock ? 'text-slate-400 line-through' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                        {formatMoney(v.sell_price)}
-                        <span className="text-[10px] text-slate-400 font-normal no-underline">/{v.selling_unit}</span>
-                      </span>
+                      {v.pricing_mode === 'denomination' && v.sos_price ? (
+                        <div>
+                          <span className={`text-sm font-black font-mono ${isOutOfStock ? 'text-slate-400 line-through' : 'text-purple-600 dark:text-purple-400'}`}>
+                            {formatSos(v.sos_price)}
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-normal block">
+                            (${calculateSosDenomination(v.sos_price).denominationUsd.toFixed(2)})
+                          </span>
+                        </div>
+                      ) : (
+                        <span className={`text-sm font-black font-mono ${isOutOfStock ? 'text-slate-400 line-through' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                          {formatMoney(v.sell_price)}
+                          <span className="text-[10px] text-slate-400 font-normal no-underline">/{v.selling_unit}</span>
+                        </span>
+                      )}
 
                       {isOutOfStock ? (
                         <span className="text-[10px] font-bold text-red-500">
                           Lama iibin karo
+                        </span>
+                      ) : v.pricing_mode === 'denomination' ? (
+                        <span className="text-[10px] font-bold text-purple-700 dark:text-purple-300 bg-purple-100 dark:bg-purple-950/80 px-1.5 py-0.5 rounded">
+                          Mode A
                         </span>
                       ) : (
                         <span className="text-[10px] font-bold text-slate-500">
@@ -580,11 +614,26 @@ export default function POSTerminalPage() {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <p className="font-bold text-slate-900 dark:text-white text-xs">
-                          {item.product.name} <span className="text-emerald-600">({item.variant.variant_name})</span>
-                        </p>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <p className="font-bold text-slate-900 dark:text-white text-xs">
+                            {item.product.name} <span className="text-emerald-600">({item.variant.variant_name})</span>
+                          </p>
+                          {item.pricing_mode === 'denomination' ? (
+                            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                              Mode A: {formatSos(item.sosPrice || 0)} SOS
+                            </span>
+                          ) : (
+                            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300">
+                              Mode B: Fixed
+                            </span>
+                          )}
+                        </div>
                         <p className="text-[10px] text-slate-400 font-mono">
-                          {formatMoney(item.unitPrice)}/{item.variant.selling_unit} | Faa'iido: +{formatMoney(item.grossProfit)}
+                          {item.pricing_mode === 'denomination' ? (
+                            <>Qiimaha: {formatSos(item.sosPrice || 0)} SOS/{item.variant.selling_unit} (${formatMoney(item.unitPrice)})</>
+                          ) : (
+                            <>{formatMoney(item.unitPrice)}/{item.variant.selling_unit}</>
+                          )} | Faa'iido: +{formatMoney(item.grossProfit)}
                         </p>
                       </div>
 
@@ -682,9 +731,16 @@ export default function POSTerminalPage() {
                         </span>
                       </div>
 
-                      <span className="font-mono font-black text-slate-900 dark:text-white text-sm">
-                        {formatMoney(item.totalPrice)}
-                      </span>
+                      <div className="text-right">
+                        <span className="font-mono font-black text-slate-900 dark:text-white text-sm block">
+                          {formatMoney(item.totalPrice)}
+                        </span>
+                        {item.pricing_mode === 'denomination' && (
+                          <span className="text-[10px] font-bold text-amber-600 dark:text-amber-400 font-mono block">
+                            {formatSos(item.sosTotal || 0)} SOS
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -767,6 +823,31 @@ export default function POSTerminalPage() {
 
           {/* Discount & Totals Summary */}
           <div className="space-y-1.5 pt-2 border-t border-slate-100 dark:border-slate-800 text-xs">
+            {totals.hasDenominationItems && (
+              <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 space-y-1 text-[11px]">
+                <div className="flex items-center justify-between font-bold text-amber-900 dark:text-amber-300">
+                  <span>Qiimaha Alaabta (SOS Value):</span>
+                  <span className="font-mono">{formatSos(totals.totalSos)} SOS</span>
+                </div>
+                <div className="flex items-center justify-between text-amber-800 dark:text-amber-300">
+                  <span>Denomination-ka La Bixinayo:</span>
+                  <span className="font-mono font-bold">${formatMoney(totals.denominationUsd)} ({formatSos(totals.denominationSos)} SOS)</span>
+                </div>
+                {totals.differenceSos > 0 && (
+                  <div className="flex items-center justify-between text-amber-700 dark:text-amber-400">
+                    <span>Farqiga Dhiman (Difference):</span>
+                    <span className="font-mono font-bold text-amber-600 dark:text-amber-300">+{formatSos(totals.differenceSos)} SOS</span>
+                  </div>
+                )}
+                {totals.fixedSubtotal > 0 && (
+                  <div className="flex items-center justify-between text-slate-600 dark:text-slate-400 pt-1 border-t border-amber-200/50">
+                    <span>Alaabta Fixed Price:</span>
+                    <span className="font-mono">{formatMoney(totals.fixedSubtotal)}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="flex justify-between text-slate-600 dark:text-slate-400">
               <span>Subtotal:</span>
               <span className="font-mono">{formatMoney(totals.subtotal)}</span>

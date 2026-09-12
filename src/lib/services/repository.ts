@@ -35,6 +35,8 @@ import {
   ReportDateFilterType
 } from '@/types';
 import { calculateCostPerBaseUnit, calculateMinSellableQty } from '@/lib/calculations/stock';
+import { calculateSaleTotal } from '@/lib/calculations/financials';
+import { calculateSosDenomination } from '@/lib/calculations/denominations';
 import { generateId } from '@/lib/utils';
 import { supabase, isSupabaseConfigured, supabaseUrl, supabaseAnonKey } from '@/lib/supabase/client';
 
@@ -696,18 +698,34 @@ class ShopRepository {
   }
 
   // ==========================================
-  // FRACTIONAL & UNIT DIVISION PERSISTENCE HELPERS
+  // FRACTIONAL & PRICING MODE PERSISTENCE HELPERS
   // ==========================================
-  private async getVariantFractionsMap(): Promise<Record<string, { unit_division: number; min_sellable_qty: number }>> {
+  private async getVariantMaps(): Promise<{
+    fractionsMap: Record<string, { unit_division: number; min_sellable_qty: number }>;
+    pricingMap: Record<string, { pricing_mode: 'fixed' | 'denomination'; sos_price?: number }>;
+  }> {
     try {
       const { data, error } = await supabase.from('shops').select('settings').limit(1).maybeSingle();
       if (!error && data && data.settings && typeof data.settings === 'object') {
-        return (data.settings.variant_fractions || {}) as Record<string, { unit_division: number; min_sellable_qty: number }>;
+        return {
+          fractionsMap: (data.settings.variant_fractions || {}) as Record<string, { unit_division: number; min_sellable_qty: number }>,
+          pricingMap: (data.settings.variant_pricing || {}) as Record<string, { pricing_mode: 'fixed' | 'denomination'; sos_price?: number }>
+        };
       }
     } catch (err) {
-      console.warn('Error reading variant fractions map:', err);
+      console.warn('Error reading variant maps:', err);
     }
-    return {};
+    return { fractionsMap: {}, pricingMap: {} };
+  }
+
+  private async getVariantFractionsMap(): Promise<Record<string, { unit_division: number; min_sellable_qty: number }>> {
+    const maps = await this.getVariantMaps();
+    return maps.fractionsMap;
+  }
+
+  private async getVariantPricingMap(): Promise<Record<string, { pricing_mode: 'fixed' | 'denomination'; sos_price?: number }>> {
+    const maps = await this.getVariantMaps();
+    return maps.pricingMap;
   }
 
   private async saveVariantFraction(variantId: string, unit_division: number, min_sellable_qty: number): Promise<void> {
@@ -734,8 +752,38 @@ class ShopRepository {
     }
   }
 
-  private formatVariantWithFractions(v: any, fractionsMap?: Record<string, any>): ProductVariant {
+  private async saveVariantPricing(variantId: string, pricing_mode: 'fixed' | 'denomination', sos_price?: number): Promise<void> {
+    try {
+      const { data: shop } = await supabase.from('shops').select('id, settings').limit(1).maybeSingle();
+      if (shop) {
+        const currentSettings = typeof shop.settings === 'object' && shop.settings !== null ? shop.settings : {};
+        const updatedPricing = {
+          ...(currentSettings.variant_pricing || {}),
+          [variantId]: {
+            pricing_mode,
+            sos_price: sos_price && Number(sos_price) > 0 ? Number(sos_price) : undefined
+          }
+        };
+        await supabase.from('shops').update({
+          settings: {
+            ...currentSettings,
+            variant_pricing: updatedPricing
+          }
+        }).eq('id', shop.id);
+      }
+    } catch (err) {
+      console.warn('Error saving variant pricing to shop settings:', err);
+    }
+  }
+
+  private formatVariantWithFractions(
+    v: any, 
+    fractionsMap?: Record<string, any>,
+    pricingMap?: Record<string, any>
+  ): ProductVariant {
     const fraction = fractionsMap?.[v.id];
+    const pricing = pricingMap?.[v.id];
+
     const unit_division = Number(v.unit_division) > 0 
       ? Number(v.unit_division) 
       : (fraction?.unit_division && Number(fraction.unit_division) > 0 
@@ -750,10 +798,21 @@ class ShopRepository {
           ? Number(fraction.min_sellable_qty) 
           : calculateMinSellableQty(unit_division));
 
+    // Pricing mode: Mode A ('denomination') or Mode B ('fixed'). Default to 'fixed' for safety
+    const pricing_mode: 'fixed' | 'denomination' = (v.pricing_mode === 'denomination' || pricing?.pricing_mode === 'denomination')
+      ? 'denomination'
+      : 'fixed';
+
+    const sos_price = Number(v.sos_price) > 0 
+      ? Number(v.sos_price) 
+      : (pricing?.sos_price && Number(pricing.sos_price) > 0 ? Number(pricing.sos_price) : undefined);
+
     return {
       ...v,
       unit_division,
       min_sellable_qty,
+      pricing_mode,
+      sos_price,
       category: v.product?.category || v.category,
     };
   }
@@ -807,8 +866,8 @@ class ShopRepository {
       };
     }
 
-    const fractionsMap = await this.getVariantFractionsMap();
-    let results = (data || []).map(v => this.formatVariantWithFractions(v, fractionsMap));
+    const { fractionsMap, pricingMap } = await this.getVariantMaps();
+    let results = (data || []).map(v => this.formatVariantWithFractions(v, fractionsMap, pricingMap));
 
     if (categoryId && categoryId !== 'all') {
       results = results.filter(v => v.product?.category_id === categoryId);
@@ -838,10 +897,10 @@ class ShopRepository {
       .maybeSingle();
 
     if (error || !data) return null;
-    const fractionsMap = await this.getVariantFractionsMap();
+    const { fractionsMap, pricingMap } = await this.getVariantMaps();
     return {
       ...data,
-      variants: (data.variants || []).map((v: any) => this.formatVariantWithFractions(v, fractionsMap)),
+      variants: (data.variants || []).map((v: any) => this.formatVariantWithFractions(v, fractionsMap, pricingMap)),
     } as Product;
   }
 
@@ -853,8 +912,8 @@ class ShopRepository {
       .maybeSingle();
 
     if (error || !data) return null;
-    const fractionsMap = await this.getVariantFractionsMap();
-    return this.formatVariantWithFractions(data, fractionsMap);
+    const { fractionsMap, pricingMap } = await this.getVariantMaps();
+    return this.formatVariantWithFractions(data, fractionsMap, pricingMap);
   }
 
   public async findVariantByBarcode(barcode: string): Promise<ProductVariant | null> {
@@ -867,8 +926,8 @@ class ShopRepository {
       .maybeSingle();
 
     if (error || !data) return null;
-    const fractionsMap = await this.getVariantFractionsMap();
-    return this.formatVariantWithFractions(data, fractionsMap);
+    const { fractionsMap, pricingMap } = await this.getVariantMaps();
+    return this.formatVariantWithFractions(data, fractionsMap, pricingMap);
   }
 
   public async createProduct(
@@ -884,6 +943,8 @@ class ShopRepository {
       conversion_factor: number;
       unit_division?: number;
       min_sellable_qty?: number;
+      pricing_mode?: 'fixed' | 'denomination';
+      sos_price?: number;
       stock_quantity: number;
       minimum_stock: number;
       supplier_id?: string;
@@ -921,6 +982,9 @@ class ShopRepository {
       ? Number(variantData.min_sellable_qty)
       : calculateMinSellableQty(division);
 
+    const pricingMode: 'fixed' | 'denomination' = variantData.pricing_mode === 'denomination' ? 'denomination' : 'fixed';
+    const sosPrice = Number(variantData.sos_price) > 0 ? Number(variantData.sos_price) : null;
+
     const newVariant = {
       id: variantId,
       product_id: productId,
@@ -934,6 +998,8 @@ class ShopRepository {
       conversion_factor: Number(variantData.conversion_factor) || 1,
       unit_division: division,
       min_sellable_qty: minSellable,
+      pricing_mode: pricingMode,
+      sos_price: sosPrice,
       stock_quantity: Number(variantData.stock_quantity) || 0,
       minimum_stock: Number(variantData.minimum_stock) || 10,
       supplier_id: variantData.supplier_id || null,
@@ -951,16 +1017,16 @@ class ShopRepository {
       .select()
       .single();
 
-    if (varErr && (varErr.message?.includes('min_sellable_qty') || varErr.message?.includes('unit_division') || varErr.code === 'PGRST204')) {
-      console.warn('[Supabase Schema] Column min_sellable_qty/unit_division not in schema cache. Saving variant and falling back...');
-      const { unit_division, min_sellable_qty, ...fallbackVariant } = newVariant;
+    if (varErr && (varErr.message?.includes('min_sellable_qty') || varErr.message?.includes('unit_division') || varErr.message?.includes('pricing_mode') || varErr.message?.includes('sos_price') || varErr.code === 'PGRST204')) {
+      console.warn('[Supabase Schema] Column min_sellable_qty/pricing_mode not in schema cache. Saving variant and falling back...');
+      const { unit_division, min_sellable_qty, pricing_mode, sos_price, ...fallbackVariant } = newVariant;
       const fallbackRes = await supabase
         .from('product_variants')
         .insert([fallbackVariant])
         .select()
         .single();
       if (!fallbackRes.error && fallbackRes.data) {
-        varCreated = { ...fallbackRes.data, unit_division, min_sellable_qty };
+        varCreated = { ...fallbackRes.data, unit_division, min_sellable_qty, pricing_mode: pricingMode, sos_price: sosPrice || undefined };
         varErr = null;
       } else if (fallbackRes.error) {
         varErr = fallbackRes.error;
@@ -973,9 +1039,16 @@ class ShopRepository {
       throw new Error(`Khalad abuurista variant: ${varErr.message}`);
     }
 
-    // Persist fractional division & min_sellable_qty directly to Supabase settings store
+    // Persist fractional division & pricing mode directly to Supabase settings store
     await this.saveVariantFraction(variantId, division, minSellable);
-    varCreated = this.formatVariantWithFractions({ ...varCreated, unit_division: division, min_sellable_qty: minSellable });
+    await this.saveVariantPricing(variantId, pricingMode, sosPrice || undefined);
+    varCreated = this.formatVariantWithFractions({ 
+      ...varCreated, 
+      unit_division: division, 
+      min_sellable_qty: minSellable,
+      pricing_mode: pricingMode,
+      sos_price: sosPrice || undefined,
+    });
 
     if (newVariant.stock_quantity > 0) {
       await supabase.from('stock_movements').insert([{
@@ -1055,6 +1128,9 @@ class ShopRepository {
         ? Number(updates.minSellableQty)
         : (prev.min_sellable_qty ? Number(prev.min_sellable_qty) : calculateMinSellableQty(division)));
 
+    const pricingMode = updates.pricing_mode || updates.pricingMode;
+    const sosPrice = updates.sos_price !== undefined ? updates.sos_price : updates.sosPrice;
+
     const variantUpdates: any = {
       variant_name: (updates.variant_name || updates.variantName || prev.variant_name || '').trim(),
       sku: updates.sku !== undefined ? (typeof updates.sku === 'string' && updates.sku.trim() ? updates.sku.trim() : null) : (prev.sku || null),
@@ -1066,6 +1142,8 @@ class ShopRepository {
       conversion_factor: updates.conversion_factor !== undefined ? Number(updates.conversion_factor) : (updates.conversionFactor !== undefined ? Number(updates.conversionFactor) : Number(prev.conversion_factor || 1)),
       unit_division: division,
       min_sellable_qty: minSellable,
+      pricing_mode: pricingMode ? (pricingMode === 'denomination' ? 'denomination' : 'fixed') : (prev.pricing_mode || 'fixed'),
+      sos_price: sosPrice !== undefined ? (Number(sosPrice) > 0 ? Number(sosPrice) : null) : (prev.sos_price || null),
       minimum_stock: updates.minimum_stock !== undefined ? Number(updates.minimum_stock) : (updates.minimumStock !== undefined ? Number(updates.minimumStock) : Number(prev.minimum_stock || 0)),
       supplier_id: cleanSupplierId,
       updated_at: new Date().toISOString(),
@@ -1078,9 +1156,9 @@ class ShopRepository {
       .select('*, product:products(*, category:categories(*)), supplier:suppliers(*)')
       .single();
 
-    if (error && (error.message?.includes('min_sellable_qty') || error.message?.includes('unit_division') || error.code === 'PGRST204')) {
-      console.warn('[Supabase Schema] Column min_sellable_qty/unit_division not in schema cache during update. Retrying without fractional columns...');
-      const { unit_division, min_sellable_qty, ...fallbackUpdates } = variantUpdates;
+    if (error && (error.message?.includes('min_sellable_qty') || error.message?.includes('unit_division') || error.message?.includes('pricing_mode') || error.message?.includes('sos_price') || error.code === 'PGRST204')) {
+      console.warn('[Supabase Schema] Column min_sellable_qty/pricing_mode not in schema cache during update. Retrying without extra columns...');
+      const { unit_division, min_sellable_qty, pricing_mode, sos_price, ...fallbackUpdates } = variantUpdates;
       const retryRes = await supabase
         .from('product_variants')
         .update(fallbackUpdates)
@@ -1088,7 +1166,7 @@ class ShopRepository {
         .select('*, product:products(*, category:categories(*)), supplier:suppliers(*)')
         .single();
       if (!retryRes.error && retryRes.data) {
-        updated = { ...retryRes.data, unit_division, min_sellable_qty };
+        updated = { ...retryRes.data, unit_division, min_sellable_qty, pricing_mode: variantUpdates.pricing_mode, sos_price: variantUpdates.sos_price || undefined };
         error = null;
       } else if (retryRes.error) {
         error = retryRes.error;
@@ -1099,9 +1177,15 @@ class ShopRepository {
       throw new Error(`Khalad beddelka variant: ${error.message}`);
     }
 
-    // Persist fractional division & min_sellable_qty directly to Supabase settings store
+    // Persist fractional division & pricing mode directly to Supabase settings store
     await this.saveVariantFraction(id, division, minSellable);
-    updated = this.formatVariantWithFractions({ ...updated, unit_division: division, min_sellable_qty: minSellable });
+    if (pricingMode !== undefined || sosPrice !== undefined) {
+      const modeToSave = pricingMode === 'denomination' ? 'denomination' : (pricingMode === 'fixed' ? 'fixed' : (prev.pricing_mode || 'fixed'));
+      const sosToSave = sosPrice !== undefined ? (Number(sosPrice) > 0 ? Number(sosPrice) : undefined) : prev.sos_price;
+      await this.saveVariantPricing(id, modeToSave, sosToSave);
+    }
+    const { fractionsMap, pricingMap } = await this.getVariantMaps();
+    updated = this.formatVariantWithFractions(updated, fractionsMap, pricingMap);
 
     await this.recordAuditLog(
       'EDIT_VARIANT',
@@ -1212,20 +1296,26 @@ class ShopRepository {
       conversionFactor: number;
       unitDivision?: number;
       minSellableQty?: number;
+      pricing_mode?: 'fixed' | 'denomination';
+      pricingMode?: 'fixed' | 'denomination';
+      sos_price?: number;
+      sosPrice?: number;
       buyPrice: number;
       sellPrice: number;
+      minimumStock?: number;
       supplierId?: string;
       categoryId?: string;
-      minimumStock?: number;
     },
     reason?: string
-  ): Promise<any> {
-    await this.checkAdminAuth('Alaab Soo Gashay (Incoming Stock)');
+  ): Promise<{ success: boolean; variant_id: string }> {
+    await this.checkAdminAuth('Soo galis Alaab (Stock In)');
 
     const division = Math.max(1, Number(data.unitDivision) || 1);
     const minSellable = data.minSellableQty !== undefined && Number(data.minSellableQty) > 0
       ? Number(data.minSellableQty)
       : calculateMinSellableQty(division);
+    const pMode = (data.pricing_mode || data.pricingMode) === 'denomination' ? 'denomination' : 'fixed';
+    const sPrice = Number(data.sos_price || data.sosPrice) > 0 ? Number(data.sos_price || data.sosPrice) : undefined;
 
     // Search for existing product & variant
     const { data: existingProds } = await supabase
@@ -1261,18 +1351,24 @@ class ShopRepository {
           conversion_factor: data.conversionFactor || currentVar.conversion_factor,
           unit_division: division,
           min_sellable_qty: minSellable,
+          pricing_mode: pMode,
+          sos_price: sPrice || null,
+          minimum_stock: data.minimumStock || currentVar.minimum_stock,
           supplier_id: data.supplierId || currentVar.supplier_id,
           updated_at: new Date().toISOString(),
         };
 
         let { error: stockUpErr } = await supabase.from('product_variants').update(updatePayload).eq('id', variantId);
-        if (stockUpErr && (stockUpErr.message?.includes('min_sellable_qty') || stockUpErr.message?.includes('unit_division') || stockUpErr.code === 'PGRST204')) {
-          const { unit_division, min_sellable_qty, ...fallbackStockPayload } = updatePayload;
+        if (stockUpErr && (stockUpErr.message?.includes('min_sellable_qty') || stockUpErr.message?.includes('unit_division') || stockUpErr.message?.includes('pricing_mode') || stockUpErr.message?.includes('sos_price') || stockUpErr.code === 'PGRST204')) {
+          const { unit_division, min_sellable_qty, pricing_mode, sos_price, ...fallbackStockPayload } = updatePayload;
           await supabase.from('product_variants').update(fallbackStockPayload).eq('id', variantId);
         }
 
-        // Persist fractional division & min_sellable_qty directly to Supabase settings store
+        // Persist fractional division & pricing mode directly to Supabase settings store
         await this.saveVariantFraction(existingVars[0].id, division, minSellable);
+        if (data.pricing_mode || data.pricingMode || data.sos_price || data.sosPrice) {
+          await this.saveVariantPricing(existingVars[0].id, pMode, sPrice);
+        }
 
         await supabase.from('stock_movements').insert([{
           id: generateId(),
@@ -1287,8 +1383,8 @@ class ShopRepository {
           created_at: new Date().toISOString(),
         }]);
 
-        await this.recordAuditLog('INCOMING_STOCK', 'product_variant', variantId || '', currentVar, { stock_quantity: newStock }, reason);
-        return { success: true, variant_id: variantId };
+        await this.recordAuditLog('INCOMING_STOCK', 'product_variant', existingVars[0].id, currentVar, { stock_quantity: newStock }, reason);
+        return { success: true, variant_id: existingVars[0].id };
       }
     }
 
@@ -1304,6 +1400,8 @@ class ShopRepository {
         conversion_factor: data.conversionFactor,
         unit_division: division,
         min_sellable_qty: minSellable,
+        pricing_mode: pMode,
+        sos_price: sPrice,
         stock_quantity: Number((data.quantity * data.conversionFactor).toFixed(4)),
         minimum_stock: data.minimumStock || 10,
         supplier_id: data.supplierId,
@@ -1328,6 +1426,8 @@ class ShopRepository {
       conversionFactor: number;
       unitDivision?: number;
       minSellableQty?: number;
+      pricingMode?: 'fixed' | 'denomination';
+      sosPrice?: number;
       quantityToAdd?: number;
       minimumStock?: number;
       categoryId?: string;
@@ -1364,6 +1464,9 @@ class ShopRepository {
     const newStock = Number((prevStock + addedQty).toFixed(4));
     const cleanSuppId = data.supplierId && typeof data.supplierId === 'string' && data.supplierId.trim().length > 0 ? data.supplierId.trim() : null;
 
+    const pMode: 'fixed' | 'denomination' = (data.pricingMode || (data as any).pricing_mode) === 'denomination' ? 'denomination' : 'fixed';
+    const sPrice = Number(data.sosPrice || (data as any).sos_price) > 0 ? Number(data.sosPrice || (data as any).sos_price) : null;
+
     const finalizePayload: any = {
       variant_name: data.variantName.trim(),
       sku: data.sku?.trim() || null,
@@ -1375,6 +1478,8 @@ class ShopRepository {
       conversion_factor: Number(data.conversionFactor) || 1,
       unit_division: division,
       min_sellable_qty: minSellable,
+      pricing_mode: pMode,
+      sos_price: sPrice,
       stock_quantity: newStock,
       minimum_stock: Number(data.minimumStock || 10),
       supplier_id: cleanSuppId,
@@ -1390,8 +1495,8 @@ class ShopRepository {
       .select('*, product:products(*)')
       .single();
 
-    if (error && (error.message?.includes('min_sellable_qty') || error.message?.includes('unit_division') || error.code === 'PGRST204')) {
-      const { unit_division, min_sellable_qty, ...fallbackFinalize } = finalizePayload;
+    if (error && (error.message?.includes('min_sellable_qty') || error.message?.includes('unit_division') || error.message?.includes('pricing_mode') || error.message?.includes('sos_price') || error.code === 'PGRST204')) {
+      const { unit_division, min_sellable_qty, pricing_mode, sos_price, ...fallbackFinalize } = finalizePayload;
       const retryRes = await supabase
         .from('product_variants')
         .update(fallbackFinalize)
@@ -1399,7 +1504,7 @@ class ShopRepository {
         .select('*, product:products(*)')
         .single();
       if (!retryRes.error && retryRes.data) {
-        updated = { ...retryRes.data, unit_division, min_sellable_qty };
+        updated = { ...retryRes.data, unit_division, min_sellable_qty, pricing_mode: pMode, sos_price: sPrice || undefined };
         error = null;
       } else if (retryRes.error) {
         error = retryRes.error;
@@ -1410,9 +1515,13 @@ class ShopRepository {
       throw new Error(`Khalad xaqiijinta alaabta: ${error.message}`);
     }
 
-    // Persist fractional division & min_sellable_qty directly to Supabase settings store
+    // Persist fractional division & pricing mode directly to Supabase settings store
     await this.saveVariantFraction(variantId, division, minSellable);
-    updated = this.formatVariantWithFractions({ ...updated, unit_division: division, min_sellable_qty: minSellable });
+    if (data.pricingMode || (data as any).pricing_mode || data.sosPrice || (data as any).sos_price) {
+      await this.saveVariantPricing(variantId, pMode, sPrice || undefined);
+    }
+    const { fractionsMap, pricingMap } = await this.getVariantMaps();
+    updated = this.formatVariantWithFractions(updated, fractionsMap, pricingMap);
 
     if (addedQty > 0) {
       await supabase.from('stock_movements').insert([{
@@ -1486,93 +1595,94 @@ class ShopRepository {
       customerId = createdCust.id;
     }
 
-    // 1. Try PostgreSQL RPC `execute_sale`
-    const itemsJson = rawItems.map(item => ({
-      variant_id: item.variant.id,
-      quantity: Number(item.quantity),
-      unit_price: Number(item.unitPrice),
-      unit_cost: Number(item.unitCost),
-      discount: Number(item.discount || 0),
-    }));
+    // Check if any cart item has denomination pricing mode
+    const hasDenomItems = rawItems.some(i => 
+      i.pricing_mode === 'denomination' || 
+      i.variant?.pricing_mode === 'denomination' ||
+      (i.sosPrice && i.sosPrice > 0) ||
+      (i.variant?.sos_price && i.variant.sos_price > 0)
+    );
 
-    const { data: rpcRes, error: rpcErr } = await supabase.rpc('execute_sale', {
-      p_shop_id: null,
-      p_customer_id: customerId || null,
-      p_items: itemsJson,
-      p_payment_method: params.paymentMethod,
-      p_overall_discount: Number(params.overallDiscount || 0),
-      p_amount_paid: Number(params.amountPaid || 0),
-      p_notes: params.notes || null,
-    });
+    // 1. Try PostgreSQL RPC `execute_sale` ONLY if no denomination items are present
+    if (!hasDenomItems) {
+      const itemsJson = rawItems.map(item => ({
+        variant_id: item.variant.id,
+        quantity: Number(item.quantity),
+        unit_price: Number(item.unitPrice),
+        unit_cost: Number(item.unitCost),
+        discount: Number(item.discount || 0),
+      }));
 
-    if (!rpcErr && rpcRes?.sale_id) {
-      const { data: saleData } = await supabase
-        .from('sales')
-        .select('*, customer:customers(*), items:sale_items(*, product_variant:product_variants(*, product:products(*)))')
-        .eq('id', rpcRes.sale_id)
-        .single();
+      const { data: rpcRes, error: rpcErr } = await supabase.rpc('execute_sale', {
+        p_shop_id: null,
+        p_customer_id: customerId || null,
+        p_items: itemsJson,
+        p_payment_method: params.paymentMethod,
+        p_overall_discount: Number(params.overallDiscount || 0),
+        p_amount_paid: Number(params.amountPaid || 0),
+        p_notes: params.notes || null,
+      });
 
-      if (saleData) {
-        if (saleData.debt_amount > 0 && customerId) {
-          const debtId = generateId();
-          const itemsSummary = rawItems.map(i => `${i.product.name} (${i.quantity} ${i.variant.selling_unit})`).join(', ');
-          await supabase.from('debts').insert([{
-            id: debtId,
-            customer_id: customerId,
-            sale_id: saleData.id,
-            items_summary: itemsSummary,
-            original_amount: saleData.total_amount,
-            amount_paid: saleData.amount_paid,
-            remaining_balance: saleData.debt_amount,
-            due_date: params.dueDate || null,
-            status: saleData.amount_paid > 0 ? 'partial' : 'unpaid',
-            notes: params.notes || 'Dayn POS iib ah',
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          }]);
+      if (!rpcErr && rpcRes?.sale_id) {
+        const { data: saleData } = await supabase
+          .from('sales')
+          .select('*, customer:customers(*), items:sale_items(*, product_variant:product_variants(*, product:products(*)))')
+          .eq('id', rpcRes.sale_id)
+          .single();
 
-          const { data: cust } = await supabase.from('customers').select('*').eq('id', customerId).single();
-          if (cust) {
-            await supabase.from('customers').update({
-              total_debt: Number(cust.total_debt || 0) + saleData.total_amount,
-              paid_debt: Number(cust.paid_debt || 0) + saleData.amount_paid,
-              remaining_debt: Number(cust.remaining_debt || 0) + saleData.debt_amount,
+        if (saleData) {
+          if (saleData.debt_amount > 0 && customerId) {
+            const debtId = generateId();
+            const itemsSummary = rawItems.map(i => `${i.product.name} (${i.quantity} ${i.variant.selling_unit})`).join(', ');
+            await supabase.from('debts').insert([{
+              id: debtId,
+              customer_id: customerId,
+              sale_id: saleData.id,
+              items_summary: itemsSummary,
+              original_amount: saleData.total_amount,
+              amount_paid: saleData.amount_paid,
+              remaining_balance: saleData.debt_amount,
+              due_date: params.dueDate || null,
+              status: saleData.amount_paid > 0 ? 'partial' : 'unpaid',
+              notes: params.notes || 'Dayn POS iib ah',
+              created_at: new Date().toISOString(),
               updated_at: new Date().toISOString(),
-            }).eq('id', customerId);
+            }]);
+
+            const { data: cust } = await supabase.from('customers').select('*').eq('id', customerId).single();
+            if (cust) {
+              await supabase.from('customers').update({
+                total_debt: Number(cust.total_debt || 0) + saleData.total_amount,
+                paid_debt: Number(cust.paid_debt || 0) + saleData.amount_paid,
+                remaining_debt: Number(cust.remaining_debt || 0) + saleData.debt_amount,
+                updated_at: new Date().toISOString(),
+              }).eq('id', customerId);
+            }
           }
+
+          await this.recordAuditLog(
+            'EXECUTE_SALE',
+            'sale',
+            saleData.id,
+            undefined,
+            saleData,
+            `Iib Cusub: #${saleData.id.slice(0, 8)} - Total: $${saleData.total_amount}`
+          );
+
+          return saleData as Sale;
         }
-
-        await this.recordAuditLog(
-          'EXECUTE_SALE',
-          'sale',
-          saleData.id,
-          undefined,
-          saleData,
-          `Iib Cusub: #${saleData.id.slice(0, 8)} - Total: $${saleData.total_amount}`
-        );
-
-        return saleData as Sale;
       }
     }
 
-    // 2. Direct transactional sequence
-    let subtotal = 0;
-    let costAmount = 0;
-
-    for (const item of rawItems) {
-      const lineSubtotal = Math.round((item.quantity * item.unitPrice - (item.discount || 0)) * 100) / 100;
-      subtotal += lineSubtotal;
-      costAmount += Math.round(item.quantity * item.unitCost * 100) / 100;
-    }
-
-    subtotal = Math.round(subtotal * 100) / 100;
-    costAmount = Math.round(costAmount * 100) / 100;
-
-    const discount = Number(params.overallDiscount || 0);
-    const totalAmount = Math.max(0, Math.round((subtotal - discount) * 100) / 100);
+    // 2. Direct transactional sequence (required for denomination items or RPC fallback)
+    const saleCalc = calculateSaleTotal(rawItems, Number(params.overallDiscount || 0));
+    const subtotal = saleCalc.subtotal;
+    const costAmount = saleCalc.costAmount;
+    const discount = saleCalc.totalDiscount;
+    const totalAmount = saleCalc.totalAmount;
     const amountPaid = params.paymentMethod === 'cash' ? totalAmount : Math.min(totalAmount, Math.max(0, Number(params.amountPaid || 0)));
     const debtAmount = Math.max(0, Math.round((totalAmount - amountPaid) * 100) / 100);
-    const grossProfit = Math.round((totalAmount - costAmount) * 100) / 100;
+    const grossProfit = saleCalc.grossProfit;
 
     const saleId = generateId();
 
@@ -1600,7 +1710,15 @@ class ShopRepository {
     }
 
     for (const item of rawItems) {
-      const itemLineTotal = Math.round((item.quantity * item.unitPrice - (item.discount || 0)) * 100) / 100;
+      const mode = item.pricing_mode || item.variant?.pricing_mode || 'fixed';
+      const itemSos = item.sosPrice ?? item.variant?.sos_price ?? 0;
+      let itemLineTotal = Math.round((item.quantity * item.unitPrice - (item.discount || 0)) * 100) / 100;
+
+      if (mode === 'denomination' && itemSos > 0) {
+        const denomRes = calculateSosDenomination(Math.round(itemSos * item.quantity));
+        itemLineTotal = denomRes.denominationUsd;
+      }
+
       const itemProfit = Math.round((itemLineTotal - (item.quantity * item.unitCost)) * 100) / 100;
 
       await supabase.from('sale_items').insert([{

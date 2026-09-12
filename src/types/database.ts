@@ -136,6 +136,8 @@ export interface ProductVariant {
   conversion_factor: number; // e.g. 50 kg per 1 jawan
   unit_division?: number; // e.g. 4 (1 kg divided into 4 parts = 0.25 kg)
   min_sellable_qty?: number; // e.g. 0.25 (1 / unit_division)
+  pricing_mode?: 'fixed' | 'denomination'; // 'fixed' (standard USD) or 'denomination' (shop SOS denomination rules)
+  sos_price?: number; // Configured price in SOS for denomination-based products (e.g. 5000 SOS)
   stock_quantity: number; // Stored in base selling units (e.g. 500 kg)
   minimum_stock: number; // In base selling units (e.g. 50 kg)
   supplier_id?: string;
@@ -188,6 +190,9 @@ export interface SaleItem {
   unit: string; // e.g. 'kg'
   unit_price: number; // selling price per base unit
   unit_cost: number; // cost per base unit (buy_price / conversion_factor)
+  pricing_mode?: 'fixed' | 'denomination';
+  sos_price?: number;
+  sos_total?: number;
   discount: number;
   total_price: number;
   gross_profit: number;

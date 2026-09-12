@@ -1,4 +1,5 @@
 import { CartItem, SaleItem } from '@/types';
+import { calculateSosDenomination } from './denominations';
 
 /**
  * Rounds a monetary amount to 2 decimal places safely, avoiding IEEE 754 floating-point under-rounding.
@@ -9,17 +10,46 @@ export function roundToCents(amount: number): number {
 
 /**
  * Calculates item subtotal, total price, and gross profit for a single cart line item.
- * Supports per-item discount and decimal quantities (e.g. 1.25 kg).
+ * Supports per-item discount, decimal quantities (e.g. 1.25 kg), and denomination mode.
  */
 export function calculateCartItemLine(
   unitPrice: number,
   unitCost: number,
   quantity: number,
-  itemDiscount: number = 0
-): { totalPrice: number; grossProfit: number; totalCost: number } {
+  itemDiscount: number = 0,
+  pricingMode: 'fixed' | 'denomination' = 'fixed',
+  sosPrice: number = 0
+): { 
+  totalPrice: number; 
+  grossProfit: number; 
+  totalCost: number;
+  sosTotal?: number;
+  denominationUsd?: number;
+  differenceSos?: number;
+} {
   const safeQty = Math.max(0, quantity);
   const safeUnitPrice = Math.max(0, unitPrice);
   const safeCost = Math.max(0, unitCost);
+
+  if (pricingMode === 'denomination' && sosPrice > 0) {
+    const sosTotal = Math.round(sosPrice * safeQty);
+    const denom = calculateSosDenomination(sosTotal);
+    const rawLineTotal = denom.denominationUsd;
+    const safeDiscount = Math.max(0, Math.min(itemDiscount, rawLineTotal));
+    const totalPrice = roundToCents(rawLineTotal - safeDiscount);
+    const totalCost = roundToCents(safeCost * safeQty);
+    const grossProfit = roundToCents(totalPrice - totalCost);
+
+    return { 
+      totalPrice, 
+      grossProfit, 
+      totalCost, 
+      sosTotal, 
+      denominationUsd: denom.denominationUsd,
+      differenceSos: denom.differenceSos
+    };
+  }
+
   const rawLineTotal = roundToCents(safeUnitPrice * safeQty);
   const safeDiscount = Math.max(0, Math.min(itemDiscount, rawLineTotal));
 
@@ -30,21 +60,32 @@ export function calculateCartItemLine(
   return { totalPrice, grossProfit, totalCost };
 }
 
-/**
- * Calculates complete POS sale totals with per-item discounts and overall sale discount.
- * Ensures profit is calculated strictly against actual final revenue.
- */
-export function calculateSaleTotal(
-  items: CartItem[] | SaleItem[],
-  wholeSaleDiscount: number = 0
-): {
+export interface SaleTotalCalculation {
   subtotal: number;
   totalDiscount: number;
   totalAmount: number;
   costAmount: number;
   grossProfit: number;
-} {
-  let subtotal = 0;
+  // Denomination details
+  hasDenominationItems: boolean;
+  totalSos: number;
+  denominationSos: number;
+  denominationUsd: number;
+  differenceSos: number;
+  fixedSubtotal: number;
+}
+
+/**
+ * Calculates complete POS sale totals with per-item discounts and overall sale discount.
+ * Ensures profit is calculated strictly against actual final revenue.
+ * Computes fixed USD items and denomination SOS items independently.
+ */
+export function calculateSaleTotal(
+  items: CartItem[] | SaleItem[],
+  wholeSaleDiscount: number = 0
+): SaleTotalCalculation {
+  let fixedSubtotal = 0;
+  let totalSos = 0;
   let itemDiscounts = 0;
   let costAmount = 0;
 
@@ -54,12 +95,44 @@ export function calculateSaleTotal(
     const cost = 'unitCost' in item ? item.unitCost : item.unit_cost;
     const disc = item.discount || 0;
 
-    const lineTotal = roundToCents(price * qty);
-    subtotal += lineTotal;
-    itemDiscounts += disc;
-    costAmount += roundToCents(cost * qty);
+    // Determine pricing mode
+    const mode = item.pricing_mode 
+      || ('variant' in item && item.variant?.pricing_mode)
+      || ('product_variant' in item && item.product_variant?.pricing_mode)
+      || 'fixed';
+
+    const itemSosPrice = ('sosPrice' in item ? item.sosPrice : undefined)
+      ?? ('sos_price' in item ? item.sos_price : undefined)
+      ?? ('variant' in item ? item.variant?.sos_price : undefined)
+      ?? ('product_variant' in item ? item.product_variant?.sos_price : undefined)
+      ?? 0;
+
+    if (mode === 'denomination' && itemSosPrice > 0) {
+      const lineSos = Math.round(itemSosPrice * qty);
+      totalSos += lineSos;
+      costAmount += roundToCents(cost * qty);
+      itemDiscounts += disc;
+    } else {
+      const lineTotal = roundToCents(price * qty);
+      fixedSubtotal += lineTotal;
+      costAmount += roundToCents(cost * qty);
+      itemDiscounts += disc;
+    }
   }
 
+  let denominationSos = 0;
+  let denominationUsd = 0;
+  let differenceSos = 0;
+  const hasDenominationItems = totalSos > 0;
+
+  if (hasDenominationItems) {
+    const denomResult = calculateSosDenomination(totalSos);
+    denominationSos = denomResult.denominationSos;
+    denominationUsd = denomResult.denominationUsd;
+    differenceSos = denomResult.differenceSos;
+  }
+
+  const subtotal = roundToCents(fixedSubtotal + denominationUsd);
   const safeOverallDiscount = Math.max(0, wholeSaleDiscount);
   const totalDiscount = roundToCents(itemDiscounts + safeOverallDiscount);
   const totalAmount = Math.max(0, roundToCents(subtotal - totalDiscount));
@@ -71,6 +144,12 @@ export function calculateSaleTotal(
     totalAmount,
     costAmount: roundToCents(costAmount),
     grossProfit,
+    hasDenominationItems,
+    totalSos,
+    denominationSos,
+    denominationUsd,
+    differenceSos,
+    fixedSubtotal: roundToCents(fixedSubtotal),
   };
 }
 

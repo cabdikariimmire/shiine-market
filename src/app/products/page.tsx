@@ -35,10 +35,11 @@ import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogBody, Dialo
 import { useToast } from '@/components/ui/toast';
 import { repository } from '@/lib/services/repository';
 import { formatMoney } from '@/lib/calculations/financials';
+import { calculateSosDenomination, formatSos } from '@/lib/calculations/denominations';
 import { 
   calculateCostPerBaseUnit, 
   calculateUnitProfit, 
-  getStockStatus,
+  getStockStatus, 
   calculateMinSellableQty,
   ALLOWED_INCOMING_UNITS,
   ALLOWED_SELLING_UNITS 
@@ -78,6 +79,8 @@ export default function ProductsPage() {
   const [stockInSUnit, setStockInSUnit] = useState('kg');
   const [stockInConv, setStockInConv] = useState<string>('');
   const [stockInDivision, setStockInDivision] = useState<string>('1');
+  const [stockInPricingMode, setStockInPricingMode] = useState<'fixed' | 'denomination'>('fixed');
+  const [stockInSosPrice, setStockInSosPrice] = useState<string>('');
   const [stockInBuy, setStockInBuy] = useState<string>('');
   const [stockInSell, setStockInSell] = useState<string>('');
   const [stockInSupplier, setStockInSupplier] = useState('');
@@ -96,6 +99,8 @@ export default function ProductsPage() {
   const [editSellingUnit, setEditSellingUnit] = useState('kg');
   const [editConversion, setEditConversion] = useState<string>('');
   const [editDivision, setEditDivision] = useState<string>('1');
+  const [editPricingMode, setEditPricingMode] = useState<'fixed' | 'denomination'>('fixed');
+  const [editSosPrice, setEditSosPrice] = useState<string>('');
   const [editMinStock, setEditMinStock] = useState<string>('');
   const [editCategoryId, setEditCategoryId] = useState('');
   const [editSupplierId, setEditSupplierId] = useState('');
@@ -152,6 +157,8 @@ export default function ProductsPage() {
           ? Math.round(1 / Number(v.min_sellable_qty)) 
           : 1);
     setEditDivision(String(division));
+    setEditPricingMode(v.pricing_mode || 'fixed');
+    setEditSosPrice(v.sos_price ? String(v.sos_price) : '');
     setEditMinStock(String(v.minimum_stock ?? 0));
     setEditCategoryId(v.product?.category_id || '');
     setEditSupplierId(v.supplier_id || '');
@@ -175,6 +182,7 @@ export default function ProductsPage() {
     const minSellable = calculateMinSellableQty(division);
     const minStock = parseFloat(editMinStock) || 0;
     const incomingQty = parseFloat(editIncomingQty) || 0;
+    const sosPriceVal = editPricingMode === 'denomination' ? (parseFloat(editSosPrice) || 0) : undefined;
 
     try {
       if (editingVariant.is_pending) {
@@ -188,6 +196,8 @@ export default function ProductsPage() {
           conversionFactor: conversion,
           unitDivision: division,
           minSellableQty: minSellable,
+          pricingMode: editPricingMode,
+          sosPrice: sosPriceVal,
           quantityToAdd: incomingQty,
           categoryId: editCategoryId.trim() ? editCategoryId.trim() : undefined,
           minimumStock: minStock,
@@ -208,6 +218,8 @@ export default function ProductsPage() {
           conversion_factor: conversion,
           unit_division: division,
           min_sellable_qty: minSellable,
+          pricing_mode: editPricingMode,
+          sos_price: sosPriceVal,
           minimum_stock: minStock,
           supplier_id: editSupplierId.trim() ? editSupplierId.trim() : null,
         }, editReason.trim() || `Wax ka beddel alaabta: ${editProductName} (${editVariantName})`);
@@ -278,8 +290,9 @@ export default function ProductsPage() {
     const division = Math.max(1, parseFloat(stockInDivision) || 1);
     const minSellable = calculateMinSellableQty(division);
     const buy = parseFloat(stockInBuy) || 0;
-    const sell = parseFloat(stockInSell);
     const min = parseFloat(stockInMin) || 0;
+    const sosPriceVal = stockInPricingMode === 'denomination' ? (parseFloat(stockInSosPrice) || 0) : undefined;
+    let sell = parseFloat(stockInSell);
 
     if (!stockInProduct.trim() || !stockInVariant.trim()) {
       error('Geli magaca alaabta iyo nooca');
@@ -289,9 +302,19 @@ export default function ProductsPage() {
       error('Geli tirada soo gashay (quantity)');
       return;
     }
-    if (isNaN(sell) || sell <= 0) {
-      error('Geli qiimaha iibinta');
-      return;
+    if (stockInPricingMode === 'denomination') {
+      if (!sosPriceVal || sosPriceVal <= 0) {
+        error('Geli qiimaha SOS ee saxda ah (tusaale: 5000 SOS)');
+        return;
+      }
+      if (isNaN(sell) || sell <= 0) {
+        sell = calculateSosDenomination(sosPriceVal).denominationUsd;
+      }
+    } else {
+      if (isNaN(sell) || sell <= 0) {
+        error('Geli qiimaha iibinta');
+        return;
+      }
     }
 
     try {
@@ -304,6 +327,8 @@ export default function ProductsPage() {
         conversionFactor: conv,
         unitDivision: division,
         minSellableQty: minSellable,
+        pricing_mode: stockInPricingMode,
+        sos_price: sosPriceVal,
         buyPrice: buy,
         sellPrice: sell,
         supplierId: stockInSupplier || undefined,
@@ -318,6 +343,8 @@ export default function ProductsPage() {
       setStockInQty('');
       setStockInConv('');
       setStockInDivision('1');
+      setStockInPricingMode('fixed');
+      setStockInSosPrice('');
       setStockInBuy('');
       setStockInSell('');
       setStockInMin('');
@@ -536,8 +563,17 @@ export default function ProductsPage() {
                         </td>
 
                         <td className="px-4 py-4 text-right font-mono font-bold text-slate-900 dark:text-white">
-                          {v.is_pending && v.sell_price === 0 ? (
+                          {v.is_pending && v.sell_price === 0 && !v.sos_price ? (
                             <span className="text-amber-600 font-semibold italic text-xs">— Geli Iibka</span>
+                          ) : v.pricing_mode === 'denomination' && v.sos_price ? (
+                            <div>
+                              <span className="text-sm font-black text-purple-600 dark:text-purple-400">
+                                {formatSos(v.sos_price)}
+                              </span>
+                              <span className="text-[10px] block font-normal text-slate-400">
+                                Mode A ({formatMoney(v.sell_price)})
+                              </span>
+                            </div>
                           ) : (
                             <>
                               {formatMoney(v.sell_price)}
@@ -869,6 +905,81 @@ export default function ProductsPage() {
                 </p>
               </div>
             </div>
+
+            {/* Pricing Mode Selection (Mode A vs Mode B) */}
+            <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="font-bold text-slate-700 dark:text-slate-300">
+                  Habka Qiimeynta (Pricing Mode) *
+                </label>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setStockInPricingMode('fixed')}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                      stockInPricingMode === 'fixed'
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+                    }`}
+                  >
+                    Mode B: Qiimo Go'an ($ USD)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setStockInPricingMode('denomination')}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                      stockInPricingMode === 'denomination'
+                        ? 'bg-purple-600 text-white shadow-xs'
+                        : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+                    }`}
+                  >
+                    Mode A: Denomination (SOS)
+                  </button>
+                </div>
+              </div>
+
+              {stockInPricingMode === 'denomination' ? (
+                <div className="grid grid-cols-2 gap-3 p-2.5 bg-purple-50/70 dark:bg-purple-950/40 rounded-xl border border-purple-200 dark:border-purple-800/60">
+                  <div>
+                    <label className="font-bold text-purple-950 dark:text-purple-200 text-[11px]">
+                      Qiimaha SOS (Tusaale: 5000 SOS) *
+                    </label>
+                    <Input
+                      type="number"
+                      step="500"
+                      placeholder="5000"
+                      value={stockInSosPrice}
+                      onChange={(e) => {
+                        setStockInSosPrice(e.target.value);
+                        const sVal = parseFloat(e.target.value) || 0;
+                        if (sVal > 0) {
+                          setStockInSell(String(calculateSosDenomination(sVal).denominationUsd));
+                        }
+                      }}
+                      className="mt-1 font-mono font-bold text-purple-700 dark:text-purple-300 bg-white dark:bg-slate-900"
+                    />
+                  </div>
+                  <div className="text-[11px] text-purple-900 dark:text-purple-300 flex flex-col justify-center">
+                    {stockInSosPrice && parseFloat(stockInSosPrice) > 0 ? (
+                      <div>
+                        <p className="font-bold">Next Denom: ${calculateSosDenomination(parseFloat(stockInSosPrice)).denominationUsd.toFixed(2)} ({calculateSosDenomination(parseFloat(stockInSosPrice)).denominationSos.toLocaleString()} SOS)</p>
+                        {calculateSosDenomination(parseFloat(stockInSosPrice)).differenceSos > 0 && (
+                          <p className="text-amber-700 dark:text-amber-400 font-semibold">
+                            Farqi: +{calculateSosDenomination(parseFloat(stockInSosPrice)).differenceSos.toLocaleString()} SOS
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-slate-500">1k=$0.05, 3k=$0.10, 4k=$0.15, 6k=$0.20, 7k=$0.25</p>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-500">
+                  Qiimaha USD ee kor lagu qoray ($/{stockInSUnit}) ayaa si go'an loogu isticmaali doonaa POS iyadoon waxba laga beddelin.
+                </p>
+              )}
+            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -1064,6 +1175,81 @@ export default function ProductsPage() {
                   Minimum: {calculateMinSellableQty(parseFloat(editDivision) || 1)} {editSellingUnit.toUpperCase()}
                 </p>
               </div>
+            </div>
+
+            {/* Pricing Mode Selection (Mode A vs Mode B) in Edit Modal */}
+            <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="font-bold text-slate-700 dark:text-slate-300">
+                  Habka Qiimeynta (Pricing Mode) *
+                </label>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setEditPricingMode('fixed')}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                      editPricingMode === 'fixed'
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+                    }`}
+                  >
+                    Mode B: Qiimo Go'an ($ USD)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditPricingMode('denomination')}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                      editPricingMode === 'denomination'
+                        ? 'bg-purple-600 text-white shadow-xs'
+                        : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+                    }`}
+                  >
+                    Mode A: Denomination (SOS)
+                  </button>
+                </div>
+              </div>
+
+              {editPricingMode === 'denomination' ? (
+                <div className="grid grid-cols-2 gap-3 p-2.5 bg-purple-50/70 dark:bg-purple-950/40 rounded-xl border border-purple-200 dark:border-purple-800/60">
+                  <div>
+                    <label className="font-bold text-purple-950 dark:text-purple-200 text-[11px]">
+                      Qiimaha SOS (Tusaale: 5000 SOS) *
+                    </label>
+                    <Input
+                      type="number"
+                      step="500"
+                      placeholder="5000"
+                      value={editSosPrice}
+                      onChange={(e) => {
+                        setEditSosPrice(e.target.value);
+                        const sVal = parseFloat(e.target.value) || 0;
+                        if (sVal > 0) {
+                          setEditSellPrice(String(calculateSosDenomination(sVal).denominationUsd));
+                        }
+                      }}
+                      className="mt-1 font-mono font-bold text-purple-700 dark:text-purple-300 bg-white dark:bg-slate-900"
+                    />
+                  </div>
+                  <div className="text-[11px] text-purple-900 dark:text-purple-300 flex flex-col justify-center">
+                    {editSosPrice && parseFloat(editSosPrice) > 0 ? (
+                      <div>
+                        <p className="font-bold">Next Denom: ${calculateSosDenomination(parseFloat(editSosPrice)).denominationUsd.toFixed(2)} ({calculateSosDenomination(parseFloat(editSosPrice)).denominationSos.toLocaleString()} SOS)</p>
+                        {calculateSosDenomination(parseFloat(editSosPrice)).differenceSos > 0 && (
+                          <p className="text-amber-700 dark:text-amber-400 font-semibold">
+                            Farqi: +{calculateSosDenomination(parseFloat(editSosPrice)).differenceSos.toLocaleString()} SOS
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-slate-500">1k=$0.05, 3k=$0.10, 4k=$0.15, 6k=$0.20, 7k=$0.25</p>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-500">
+                  Qiimaha USD ee kor lagu qoray ($/{editSellingUnit}) ayaa si go'an loogu isticmaali doonaa POS iyadoon waxba laga beddelin.
+                </p>
+              )}
             </div>
           </div>
 

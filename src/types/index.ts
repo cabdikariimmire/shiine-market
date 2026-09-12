@@ -23,6 +23,7 @@ import {
 
 export * from './database';
 export * from '@/lib/auth/types';
+export * from '@/lib/calculations/denominations';
 
 export interface CartItem {
   product: Product;
@@ -31,6 +32,9 @@ export interface CartItem {
   quantityInput?: string; // string representation during manual typing
   unitPrice: number; // per selling unit
   unitCost: number; // cost per selling unit
+  pricing_mode?: 'fixed' | 'denomination';
+  sosPrice?: number; // Configured price in SOS for denomination items
+  sosTotal?: number; // quantity * sosPrice
   discount: number;
   totalPrice: number;
   grossProfit: number;
