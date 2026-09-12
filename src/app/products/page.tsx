@@ -23,7 +23,6 @@ import {
   ChevronRight,
   ArrowUpDown,
   Layers,
-  Camera,
   Scale,
   X
 } from 'lucide-react';
@@ -147,7 +146,12 @@ export default function ProductsPage() {
     setEditSellPrice(String(v.sell_price ?? 0));
     setEditSellingUnit(v.selling_unit || 'kg');
     setEditConversion(String(v.conversion_factor || 1));
-    setEditDivision(String(v.unit_division || 1));
+    const division = v.unit_division && Number(v.unit_division) > 0 
+      ? Number(v.unit_division) 
+      : (v.min_sellable_qty && Number(v.min_sellable_qty) > 0 
+          ? Math.round(1 / Number(v.min_sellable_qty)) 
+          : 1);
+    setEditDivision(String(division));
     setEditMinStock(String(v.minimum_stock ?? 0));
     setEditCategoryId(v.product?.category_id || '');
     setEditSupplierId(v.supplier_id || '');
@@ -369,13 +373,6 @@ export default function ProductsPage() {
 
           {isAdmin && (
             <div className="flex flex-wrap items-center gap-2.5">
-              <Link href="/ai-camera">
-                <Button variant="outline" className="font-bold flex items-center gap-2 border-emerald-300 text-emerald-700 dark:border-emerald-800 dark:text-emerald-300">
-                  <Camera className="h-4 w-4 text-emerald-600" />
-                  AI Scan Invoice
-                </Button>
-              </Link>
-
               <Button 
                 onClick={() => {
                   setStockInProduct('');
@@ -919,7 +916,7 @@ export default function ProductsPage() {
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-slate-900 dark:text-white font-black text-lg">
             <Edit className="h-5 w-5 text-blue-600" />
-            {editingVariant?.is_pending ? 'Xaqiiji & Sax Alaabta AI Scan-ka' : 'Wax ka beddel Alaabta (Edit Product)'}
+            {editingVariant?.is_pending ? 'Xaqiiji & Sax Alaabta Sugaysa' : 'Wax ka beddel Alaabta (Edit Product)'}
           </DialogTitle>
           <DialogDescription>
             {editingVariant?.is_pending 

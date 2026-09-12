@@ -17,8 +17,6 @@ import {
   StockMovementType,
   DebtStatus,
   ExpenseCategory,
-  DetectionResult,
-  BoundingBox,
   CallLog,
   PaginatedResult
 } from './database';
@@ -77,35 +75,6 @@ export interface ProfitReportRow {
   cashReceived: number;
 }
 
-export interface InvoiceScannedItem {
-  id: string;
-  productName: string;
-  variantName: string;
-  quantity: number; // in purchase units
-  purchaseUnit: string;
-  buyPrice: number; // per purchase unit
-  totalCost: number;
-  suggestedSellingPrice?: number;
-  suggestedSellingUnit?: string;
-  suggestedConversionFactor?: number;
-  matchedVariantId?: string;
-  matchedProductId?: string;
-  isExistingProduct: boolean;
-  previousBuyPrice?: number;
-  previousSellPrice?: number;
-  previousStock?: number;
-}
-
-export interface InvoiceScanResult {
-  supplierName?: string;
-  invoiceNumber?: string;
-  invoiceDate?: string;
-  items: InvoiceScannedItem[];
-  totalAmount: number;
-  confidence: number;
-  rawOcrText?: string;
-}
-
 export interface ShopSettings {
   shopName: string;
   shopPhone: string;
@@ -120,7 +89,6 @@ export interface ShopSettings {
   defaultPurchaseUnit: string;
   defaultSellingUnit: string;
   defaultConversionFactor: number;
-  aiDetectionConfidenceThreshold: number;
   theme: 'light' | 'dark' | 'system';
   language: 'so';
   dateFormat: string;

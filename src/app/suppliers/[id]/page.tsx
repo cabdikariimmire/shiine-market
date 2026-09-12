@@ -12,7 +12,6 @@ import {
   Truck, 
   DollarSign, 
   Layers, 
-  Camera, 
   FileText,
   Clock,
   ChevronRight,
@@ -218,13 +217,6 @@ export default function SupplierDetailPage() {
               <Edit className="h-4 w-4 text-emerald-600" />
               Wax ka beddel Qeybiyaha
             </Button>
-
-            <Link href="/ai-camera">
-              <Button variant="outline" className="gap-2 border-emerald-300 text-emerald-700 dark:border-emerald-800 dark:text-emerald-300 font-bold">
-                <Camera className="h-4 w-4" />
-                Scan Invoice
-              </Button>
-            </Link>
           </div>
         </div>
 

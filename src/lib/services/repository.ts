@@ -29,7 +29,6 @@ import {
   DebtPaymentCorrectionPayload,
   StockAdjustmentPayload,
   PaymentMethod,
-  InvoiceScanResult,
   ProductSalesReportRow,
   ProductSaleTransactionDetail,
   ProductSalesReportSummary,
@@ -53,7 +52,6 @@ const DEFAULT_SETTINGS: ShopSettings = {
   defaultPurchaseUnit: 'jawan',
   defaultSellingUnit: 'kg',
   defaultConversionFactor: 50,
-  aiDetectionConfidenceThreshold: 75,
   theme: 'light',
   language: 'so',
   dateFormat: 'DD/MM/YYYY',
@@ -231,7 +229,6 @@ class ShopRepository {
         defaultPurchaseUnit: DEFAULT_SETTINGS.defaultPurchaseUnit,
         defaultSellingUnit: DEFAULT_SETTINGS.defaultSellingUnit,
         defaultConversionFactor: 50,
-        aiDetectionConfidenceThreshold: 75,
         theme: 'light',
         language: 'so',
         dateFormat: 'DD/MM/YYYY',
@@ -699,6 +696,69 @@ class ShopRepository {
   }
 
   // ==========================================
+  // FRACTIONAL & UNIT DIVISION PERSISTENCE HELPERS
+  // ==========================================
+  private async getVariantFractionsMap(): Promise<Record<string, { unit_division: number; min_sellable_qty: number }>> {
+    try {
+      const { data, error } = await supabase.from('shops').select('settings').limit(1).maybeSingle();
+      if (!error && data && data.settings && typeof data.settings === 'object') {
+        return (data.settings.variant_fractions || {}) as Record<string, { unit_division: number; min_sellable_qty: number }>;
+      }
+    } catch (err) {
+      console.warn('Error reading variant fractions map:', err);
+    }
+    return {};
+  }
+
+  private async saveVariantFraction(variantId: string, unit_division: number, min_sellable_qty: number): Promise<void> {
+    try {
+      const { data: shop } = await supabase.from('shops').select('id, settings').limit(1).maybeSingle();
+      if (shop) {
+        const currentSettings = typeof shop.settings === 'object' && shop.settings !== null ? shop.settings : {};
+        const updatedFractions = {
+          ...(currentSettings.variant_fractions || {}),
+          [variantId]: {
+            unit_division,
+            min_sellable_qty
+          }
+        };
+        await supabase.from('shops').update({
+          settings: {
+            ...currentSettings,
+            variant_fractions: updatedFractions
+          }
+        }).eq('id', shop.id);
+      }
+    } catch (err) {
+      console.warn('Error saving variant fraction to shop settings:', err);
+    }
+  }
+
+  private formatVariantWithFractions(v: any, fractionsMap?: Record<string, any>): ProductVariant {
+    const fraction = fractionsMap?.[v.id];
+    const unit_division = Number(v.unit_division) > 0 
+      ? Number(v.unit_division) 
+      : (fraction?.unit_division && Number(fraction.unit_division) > 0 
+          ? Number(fraction.unit_division) 
+          : (Number(v.min_sellable_qty) > 0 
+              ? Math.round(1 / Number(v.min_sellable_qty)) 
+              : 1));
+              
+    const min_sellable_qty = Number(v.min_sellable_qty) > 0 
+      ? Number(v.min_sellable_qty) 
+      : (fraction?.min_sellable_qty && Number(fraction.min_sellable_qty) > 0 
+          ? Number(fraction.min_sellable_qty) 
+          : calculateMinSellableQty(unit_division));
+
+    return {
+      ...v,
+      unit_division,
+      min_sellable_qty,
+      category: v.product?.category || v.category,
+    };
+  }
+
+  // ==========================================
   // PRODUCTS & PRODUCT VARIANTS (Scalable Supabase)
   // ==========================================
   public async getVariantsPaginated(
@@ -747,10 +807,8 @@ class ShopRepository {
       };
     }
 
-    let results = (data || []).map(v => ({
-      ...v,
-      category: v.product?.category,
-    })) as ProductVariant[];
+    const fractionsMap = await this.getVariantFractionsMap();
+    let results = (data || []).map(v => this.formatVariantWithFractions(v, fractionsMap));
 
     if (categoryId && categoryId !== 'all') {
       results = results.filter(v => v.product?.category_id === categoryId);
@@ -780,7 +838,11 @@ class ShopRepository {
       .maybeSingle();
 
     if (error || !data) return null;
-    return data as Product;
+    const fractionsMap = await this.getVariantFractionsMap();
+    return {
+      ...data,
+      variants: (data.variants || []).map((v: any) => this.formatVariantWithFractions(v, fractionsMap)),
+    } as Product;
   }
 
   public async getVariantById(id: string): Promise<ProductVariant | null> {
@@ -791,10 +853,8 @@ class ShopRepository {
       .maybeSingle();
 
     if (error || !data) return null;
-    return {
-      ...data,
-      category: data.product?.category,
-    } as ProductVariant;
+    const fractionsMap = await this.getVariantFractionsMap();
+    return this.formatVariantWithFractions(data, fractionsMap);
   }
 
   public async findVariantByBarcode(barcode: string): Promise<ProductVariant | null> {
@@ -807,10 +867,8 @@ class ShopRepository {
       .maybeSingle();
 
     if (error || !data) return null;
-    return {
-      ...data,
-      category: data.product?.category,
-    } as ProductVariant;
+    const fractionsMap = await this.getVariantFractionsMap();
+    return this.formatVariantWithFractions(data, fractionsMap);
   }
 
   public async createProduct(
@@ -886,7 +944,8 @@ class ShopRepository {
       updated_at: new Date().toISOString(),
     };
 
-    let { data: varCreated, error: varErr } = await supabase
+    let varCreated: any = null;
+    let { data: varData, error: varErr } = await supabase
       .from('product_variants')
       .insert([newVariant])
       .select()
@@ -906,11 +965,17 @@ class ShopRepository {
       } else if (fallbackRes.error) {
         varErr = fallbackRes.error;
       }
+    } else {
+      varCreated = varData;
     }
 
     if (varErr) {
       throw new Error(`Khalad abuurista variant: ${varErr.message}`);
     }
+
+    // Persist fractional division & min_sellable_qty directly to Supabase settings store
+    await this.saveVariantFraction(variantId, division, minSellable);
+    varCreated = this.formatVariantWithFractions({ ...varCreated, unit_division: division, min_sellable_qty: minSellable });
 
     if (newVariant.stock_quantity > 0) {
       await supabase.from('stock_movements').insert([{
@@ -978,7 +1043,12 @@ class ShopRepository {
       cleanSupplierId = (rawSuppId && typeof rawSuppId === 'string' && rawSuppId.trim().length > 0) ? rawSuppId.trim() : null;
     }
 
-    const division = updates.unit_division !== undefined ? Math.max(1, Number(updates.unit_division) || 1) : (updates.unitDivision !== undefined ? Math.max(1, Number(updates.unitDivision) || 1) : Math.max(1, Number(prev.unit_division) || 1));
+    const division = updates.unit_division !== undefined 
+      ? Math.max(1, Number(updates.unit_division) || 1) 
+      : (updates.unitDivision !== undefined 
+          ? Math.max(1, Number(updates.unitDivision) || 1) 
+          : Math.max(1, Number(prev.unit_division) || 1));
+
     const minSellable = updates.min_sellable_qty !== undefined && Number(updates.min_sellable_qty) > 0
       ? Number(updates.min_sellable_qty)
       : (updates.minSellableQty !== undefined && Number(updates.minSellableQty) > 0
@@ -1028,6 +1098,10 @@ class ShopRepository {
     if (error) {
       throw new Error(`Khalad beddelka variant: ${error.message}`);
     }
+
+    // Persist fractional division & min_sellable_qty directly to Supabase settings store
+    await this.saveVariantFraction(id, division, minSellable);
+    updated = this.formatVariantWithFractions({ ...updated, unit_division: division, min_sellable_qty: minSellable });
 
     await this.recordAuditLog(
       'EDIT_VARIANT',
@@ -1197,6 +1271,9 @@ class ShopRepository {
           await supabase.from('product_variants').update(fallbackStockPayload).eq('id', variantId);
         }
 
+        // Persist fractional division & min_sellable_qty directly to Supabase settings store
+        await this.saveVariantFraction(existingVars[0].id, division, minSellable);
+
         await supabase.from('stock_movements').insert([{
           id: generateId(),
           product_variant_id: variantId,
@@ -1333,6 +1410,10 @@ class ShopRepository {
       throw new Error(`Khalad xaqiijinta alaabta: ${error.message}`);
     }
 
+    // Persist fractional division & min_sellable_qty directly to Supabase settings store
+    await this.saveVariantFraction(variantId, division, minSellable);
+    updated = this.formatVariantWithFractions({ ...updated, unit_division: division, min_sellable_qty: minSellable });
+
     if (addedQty > 0) {
       await supabase.from('stock_movements').insert([{
         id: generateId(),
@@ -1342,8 +1423,8 @@ class ShopRepository {
         previous_quantity: prevStock,
         new_quantity: newStock,
         unit: data.sellingUnit,
-        reference_type: 'invoice_ocr_confirm',
-        notes: reason || 'Xaqiijinta alaab cusub oo ka timid invoice OCR',
+        reference_type: 'variant_finalize',
+        notes: reason || 'Xaqiijinta alaab cusub',
         created_at: new Date().toISOString(),
       }]);
     }
@@ -1354,61 +1435,10 @@ class ShopRepository {
       variantId,
       variant,
       updated,
-      reason || 'Xaqiijinta alaab cusub oo ka timid invoice OCR'
+      reason || 'Xaqiijinta alaab cusub'
     );
 
     return updated as ProductVariant;
-  }
-
-  public async confirmScannedInvoiceToPending(
-    scanResult: InvoiceScanResult,
-    supplierId?: string
-  ): Promise<number> {
-    await this.checkAdminAuth('Soo Diridda Invoice OCR sida Pending');
-
-    let count = 0;
-    for (const item of scanResult.items) {
-      const prodId = generateId();
-      const varId = generateId();
-
-      await supabase.from('products').insert([{
-        id: prodId,
-        name: item.productName.trim(),
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }]);
-
-      await supabase.from('product_variants').insert([{
-        id: varId,
-        product_id: prodId,
-        variant_name: item.variantName.trim() || 'Default',
-        buy_price: item.buyPrice || 0,
-        purchase_unit: item.purchaseUnit || 'jawan',
-        sell_price: item.suggestedSellingPrice || item.buyPrice * 1.25,
-        selling_unit: item.suggestedSellingUnit || 'kg',
-        conversion_factor: item.suggestedConversionFactor || 50,
-        stock_quantity: (item.quantity || 1) * (item.suggestedConversionFactor || 50),
-        minimum_stock: 10,
-        supplier_id: supplierId || null,
-        is_pending: true,
-        is_active: true,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }]);
-
-      count++;
-    }
-
-    await this.recordAuditLog(
-      'INVOICE_OCR_TO_PENDING',
-      'product_variant',
-      undefined,
-      undefined,
-      { count },
-      `Invoice OCR: ${count} xariiq oo pending loo diray`
-    );
-
-    return count;
   }
 
   public async getStockMovements(variantId?: string, limit: number = 100): Promise<StockMovement[]> {

@@ -2,7 +2,7 @@
 
 import React from 'react';
 import Link from 'next/link';
-import { Menu, Plus, ShoppingCart, Camera, LogOut, ShieldCheck, UserCheck } from 'lucide-react';
+import { Menu, Plus, ShoppingCart, LogOut, ShieldCheck, UserCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth/auth-context';
 
@@ -39,18 +39,6 @@ export function Header({ onMenuToggle, title = "Tukaan Dashboard", lowStockCount
       <div className="flex items-center gap-2 sm:gap-3">
         {role === 'admin' ? (
           <>
-            {/* Quick AI Camera Button */}
-            <Link href="/ai-camera">
-              <Button 
-                variant="outline" 
-                size="sm" 
-                className="hidden sm:flex items-center gap-1.5 border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100 dark:bg-purple-950/40 dark:border-purple-800 dark:text-purple-300 font-semibold"
-              >
-                <Camera className="h-4 w-4" />
-                <span>AI Camera</span>
-              </Button>
-            </Link>
-
             {/* Quick Product Add */}
             <Link href="/products">
               <Button variant="outline" size="sm" className="hidden md:flex items-center gap-1.5 font-medium">

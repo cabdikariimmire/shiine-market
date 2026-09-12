@@ -24,8 +24,7 @@ export type StockMovementType =
   | 'sale' 
   | 'sale_return' 
   | 'purchase_return' 
-  | 'adjustment' 
-  | 'ai_count';
+  | 'adjustment';
 
 export type DebtStatus = 'unpaid' | 'partial' | 'paid' | 'overdue';
 
@@ -142,7 +141,7 @@ export interface ProductVariant {
   supplier_id?: string;
   image_url?: string;
   is_active: boolean;
-  is_pending?: boolean; // For pending AI invoice rows awaiting user edit & save
+  is_pending?: boolean; // For pending product rows awaiting user edit & save
   created_at: string;
   updated_at: string;
   // Joins / Computed
@@ -350,24 +349,6 @@ export interface StockAdjustmentPayload {
   variantId: string;
   quantityChange: number;
   reason: string;
-}
-
-export interface BoundingBox {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-export interface DetectionResult {
-  productId?: string;
-  variantId?: string;
-  productName: string;
-  variantName?: string;
-  quantity: number;
-  confidence: number;
-  boundingBoxes?: BoundingBox[];
-  matchedVariant?: ProductVariant;
 }
 
 export interface PaginatedResult<T> {

@@ -14,8 +14,6 @@
     "@hookform/resolvers": "^3.9.0",
     "@supabase/ssr": "^0.5.1",
     "@supabase/supabase-js": "^2.45.4",
-    "@tensorflow-models/coco-ssd": "^2.2.3",
-    "@tensorflow/tfjs": "^4.21.0",
     "clsx": "^2.1.1",
     "html5-qrcode": "^2.3.8",
     "lucide-react": "^0.446.0",
@@ -24,7 +22,6 @@
     "react-dom": "^18.3.1",
     "react-hook-form": "^7.53.0",
     "tailwind-merge": "^2.5.2",
-    "tesseract.js": "^7.0.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

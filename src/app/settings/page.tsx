@@ -8,7 +8,6 @@ import {
   Bell, 
   ShoppingCart, 
   Package, 
-  Camera, 
   Palette, 
   Save, 
   CheckCircle2, 
@@ -45,7 +44,7 @@ import { formatMoney } from '@/lib/calculations/financials';
 export default function SettingsPage() {
   const { user: currentUser } = useAuth();
   const { success, error, info } = useToast();
-  const [activeTab, setActiveTab] = useState<'shop' | 'users' | 'audit' | 'notifications' | 'pos' | 'products' | 'ai' | 'appearance'>('shop');
+  const [activeTab, setActiveTab] = useState<'shop' | 'users' | 'audit' | 'notifications' | 'pos' | 'products' | 'appearance'>('shop');
   const [settings, setSettings] = useState<ShopSettings>({
     shopName: 'Tukaan Shiine Supermarket',
     shopPhone: '+252 61 5500112',
@@ -60,7 +59,6 @@ export default function SettingsPage() {
     defaultPurchaseUnit: 'kartoon',
     defaultSellingUnit: 'xabo',
     defaultConversionFactor: 50,
-    aiDetectionConfidenceThreshold: 75,
     theme: 'light',
     language: 'so',
     dateFormat: 'DD/MM/YYYY',
@@ -274,7 +272,6 @@ export default function SettingsPage() {
             { id: 'notifications', label: 'Ogaysiisyada (Email Alerts)', icon: Bell },
             { id: 'pos', label: 'POS & Rasiidhka', icon: ShoppingCart },
             { id: 'products', label: 'Alaabta & Halbeegyada', icon: Package },
-            { id: 'ai', label: 'AI & Kaamirada', icon: Camera },
             { id: 'appearance', label: 'Muuqaalka & Afka', icon: Palette },
           ].map((tab) => {
             const Icon = tab.icon;
@@ -761,37 +758,7 @@ export default function SettingsPage() {
           </Card>
         )}
 
-        {/* TAB 7: AI SETTINGS */}
-        {activeTab === 'ai' && (
-          <Card className="p-6 border border-slate-200/80 dark:border-slate-800 shadow-xs space-y-4">
-            <h3 className="text-base font-black text-slate-900 dark:text-white flex items-center gap-2">
-              <Camera className="h-5 w-5 text-emerald-600" />
-              Habaynta AI Vision & OCR
-            </h3>
-
-            <div className="space-y-4 text-xs">
-              <div>
-                <label className="font-bold text-slate-700 dark:text-slate-300">
-                  Heerka Hubnaanta AI ee Ugu Yar (Confidence Threshold %): {settings.aiDetectionConfidenceThreshold}%
-                </label>
-                <input
-                  type="range"
-                  min="50"
-                  max="95"
-                  value={settings.aiDetectionConfidenceThreshold}
-                  onChange={(e) => setSettings({ ...settings, aiDetectionConfidenceThreshold: Number(e.target.value) })}
-                  className="w-full mt-2"
-                />
-              </div>
-
-              <div className="p-3 bg-emerald-50 dark:bg-emerald-950/30 rounded-xl border border-emerald-200 dark:border-emerald-900 text-[11px] text-emerald-800 dark:text-emerald-300">
-                ✓ <strong>Human Confirmation Requirement:</strong> AI ma beddeli karto kaydka iyadoon shaqaaluhu gujin "Xaqiiji".
-              </div>
-            </div>
-          </Card>
-        )}
-
-        {/* TAB 8: APPEARANCE */}
+        {/* TAB 7: APPEARANCE */}
         {activeTab === 'appearance' && (
           <Card className="p-6 border border-slate-200/80 dark:border-slate-800 shadow-xs space-y-4">
             <h3 className="text-base font-black text-slate-900 dark:text-white flex items-center gap-2">

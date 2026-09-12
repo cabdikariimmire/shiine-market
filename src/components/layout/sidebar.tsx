@@ -12,7 +12,6 @@ import {
   Building2,
   Receipt,
   FileBarChart,
-  Camera,
   Settings,
   Store,
   ChevronRight,
@@ -42,7 +41,6 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
   const pathname = usePathname();
   const { user, role, logout } = useAuth();
 
-  // Exactly the 10 menus mandated by the Master Prompt
   const allMenuItems: NavMenuItem[] = [
     { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     { name: 'Iibka / POS', href: '/sales/new', icon: ShoppingCart, highlight: true, adminOnly: true },
@@ -52,7 +50,6 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
     { name: 'Suppliers', href: '/suppliers', icon: Building2, adminOnly: true },
     { name: 'Expenses', href: '/expenses', icon: Receipt, adminOnly: true },
     { name: 'Reports', href: '/reports', icon: FileBarChart },
-    { name: 'AI Camera', href: '/ai-camera', icon: Camera, badge: 'Live AI', adminOnly: true },
     { name: 'Settings', href: '/settings', icon: Settings, adminOnly: true },
   ];
 

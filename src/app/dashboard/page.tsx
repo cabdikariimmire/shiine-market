@@ -12,7 +12,7 @@ import {
   AlertTriangle, 
   Package, 
   ShoppingCart, 
-  Camera, 
+  Building2, 
   Plus, 
   ArrowRight,
   Sparkles,
@@ -190,10 +190,10 @@ export default function DashboardPage() {
             </Button>
           </Link>
 
-          <Link href="/ai-camera">
+          <Link href="/suppliers">
             <Button variant="outline" className="w-full h-14 bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 font-bold flex items-center justify-center gap-2 rounded-2xl">
-              <Camera className="h-5 w-5 text-purple-600" />
-              <span>AI Invoice Scan</span>
+              <Building2 className="h-5 w-5 text-indigo-600" />
+              <span>Alaab-qeybiye (Suppliers)</span>
             </Button>
           </Link>
 

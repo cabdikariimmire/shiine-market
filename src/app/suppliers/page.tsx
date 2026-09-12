@@ -12,7 +12,6 @@ import {
   Eye, 
   Truck,
   DollarSign,
-  Camera,
   Calendar,
   Layers,
   ArrowRight,
@@ -151,13 +150,6 @@ export default function SuppliersPage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
-            <Link href="/ai-camera">
-              <Button variant="outline" className="font-bold flex items-center gap-2 border-emerald-300 text-emerald-700 dark:border-emerald-800 dark:text-emerald-300">
-                <Camera className="h-4 w-4 text-emerald-600" />
-                AI Scan Invoice
-              </Button>
-            </Link>
-
             <Button 
               onClick={() => setIsModalOpen(true)}
               className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center gap-2 shadow-md shadow-emerald-600/20"
