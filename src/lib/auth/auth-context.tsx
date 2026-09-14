@@ -39,6 +39,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
 
   const fetchProfileForUser = async (authUserId: string, authUserEmail: string, userMetadata?: any): Promise<SystemUser> => {
+    let shopId: string | null = null;
+    let shopCustomRole: UserRole | null = null;
+    let shopCustomName: string | null = null;
+    let shopCustomStatus: any = 'active';
+
+    try {
+      const { data: shop } = await supabase
+        .from('shops')
+        .select('id, settings')
+        .order('created_at', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
+      if (shop) {
+        shopId = shop.id;
+        if (shop.settings?.users && Array.isArray(shop.settings.users)) {
+          const matching = shop.settings.users.find(
+            (u: SystemUser) => u.id === authUserId || u.email.toLowerCase() === authUserEmail.toLowerCase()
+          );
+          if (matching) {
+            shopCustomRole = matching.role;
+            shopCustomName = matching.name;
+            shopCustomStatus = matching.status || 'active';
+          }
+        }
+      }
+    } catch (shopErr) {
+      console.warn('Shop lookup notice in fetchProfileForUser:', shopErr);
+    }
+
     try {
       // 3.5s timeout race so profile lookup never hangs the UI
       const profilePromise = supabase
@@ -54,15 +84,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const { data: profile, error } = await Promise.race([profilePromise, timeoutPromise]);
 
       if (profile && !error) {
-        const roleStr = String(profile.role || '').toLowerCase();
+        const roleStr = String(shopCustomRole || profile.role || '').toLowerCase();
         const role: UserRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
+        const email = profile.phone && profile.phone.includes('@') ? profile.phone : authUserEmail;
 
         return {
           id: profile.id,
-          name: profile.full_name || authUserEmail.split('@')[0] || 'User',
-          email: authUserEmail,
+          name: shopCustomName || profile.full_name || authUserEmail.split('@')[0] || 'User',
+          email,
           role,
-          status: 'active',
+          status: shopCustomStatus || 'active',
           created_at: profile.created_at || new Date().toISOString(),
         };
       }
@@ -70,18 +101,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.warn('Profile fetch notice:', err);
     }
 
-    const metaRole = String(userMetadata?.role || '').toLowerCase();
+    const metaRole = String(shopCustomRole || userMetadata?.role || '').toLowerCase();
     const assignedRole: UserRole = 
       metaRole === 'reporter' || authUserEmail.toLowerCase().includes('reporter') 
         ? 'reporter' 
         : (metaRole === 'seller' || authUserEmail.toLowerCase().includes('seller') ? 'seller' : 'admin');
 
+    const userName = shopCustomName || userMetadata?.full_name || authUserEmail.split('@')[0] || 'User';
+
+    // Auto-sync profile row to profiles table in background
+    if (authUserId) {
+      try {
+        await supabase.from('profiles').upsert([{
+          id: authUserId,
+          full_name: userName,
+          phone: authUserEmail,
+          role: assignedRole,
+          shop_id: shopId,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }]);
+      } catch (upsertErr) {
+        console.warn('Profile auto-sync notice:', upsertErr);
+      }
+    }
+
     return {
       id: authUserId,
-      name: userMetadata?.full_name || authUserEmail.split('@')[0] || 'User',
+      name: userName,
       email: authUserEmail,
       role: assignedRole,
-      status: 'active',
+      status: shopCustomStatus || 'active',
       created_at: new Date().toISOString(),
     };
   };

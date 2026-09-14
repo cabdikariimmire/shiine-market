@@ -32,10 +32,21 @@ import {
   ProductSalesReportRow,
   ProductSaleTransactionDetail,
   ProductSalesReportSummary,
-  ReportDateFilterType
+  ReportDateFilterType,
+  ManagementMode,
+  AmountSellingOption,
+  ProductBatch,
+  BatchReconciliationPayload,
+  OilBatchReportRow
 } from '@/types';
-import { calculateCostPerBaseUnit, calculateMinSellableQty } from '@/lib/calculations/stock';
-import { calculateSaleTotal } from '@/lib/calculations/financials';
+import { 
+  calculateCostPerBaseUnit, 
+  calculateMinSellableQty,
+  calculatePackRatio,
+  calculateBatchCostPerUnit,
+  calculateBatchVariance
+} from '@/lib/calculations/stock';
+import { calculateSaleTotal, calculateBatchProfitLoss } from '@/lib/calculations/financials';
 import { calculateSosDenomination } from '@/lib/calculations/denominations';
 import { generateId } from '@/lib/utils';
 import { supabase, isSupabaseConfigured, supabaseUrl, supabaseAnonKey } from '@/lib/supabase/client';
@@ -45,11 +56,14 @@ const DEFAULT_SETTINGS: ShopSettings = {
   shopPhone: '+252 61 5500112',
   shopAddress: 'Suuqa Bakaaraha, Mogadishu',
   currency: '$',
+  signatureUrl: '',
   receiptHeader: 'TUAKAAN SHIINE POS',
   receiptFooter: 'Mahadsanid! Soo Dhawoow Mar Kale.',
   lowStockEmailEnabled: true,
   outOfStockEmailEnabled: true,
   alertRecipientEmail: 'admin@tukaanshiine.so',
+  alertRecipientRoles: ['admin'],
+  alertRecipientUserIds: [],
   debtOverdueDays: 7,
   defaultPurchaseUnit: 'jawan',
   defaultSellingUnit: 'kg',
@@ -63,6 +77,22 @@ class ShopRepository {
   // ==========================================
   // AUTHENTICATION & ROLE ACCESS CONTROL
   // ==========================================
+  public async getCurrentShopId(): Promise<string | null> {
+    try {
+      if (!isSupabaseConfigured) return null;
+      const { data, error } = await supabase
+        .from('shops')
+        .select('id')
+        .order('created_at', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (error || !data) return null;
+      return data.id;
+    } catch {
+      return null;
+    }
+  }
+
   public async getCurrentUser(): Promise<SystemUser | null> {
     try {
       if (!isSupabaseConfigured) return null;
@@ -81,12 +111,42 @@ class ShopRepository {
 
       const { data: profile } = await Promise.race([profilePromise, timeoutPromise]);
 
-      const roleStr = String(profile?.role || user.user_metadata?.role || '').toLowerCase();
+      let customRole: UserRole | null = null;
+      let customName: string | null = null;
+
+      if (profile?.role) {
+        const roleStr = String(profile.role).toLowerCase();
+        customRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
+        customName = profile.full_name;
+      } else {
+        // Check shops.settings.users roster
+        try {
+          const { data: shop } = await supabase
+            .from('shops')
+            .select('settings')
+            .order('created_at', { ascending: true })
+            .limit(1)
+            .maybeSingle();
+          if (shop?.settings?.users && Array.isArray(shop.settings.users)) {
+            const matching = shop.settings.users.find(
+              (u: SystemUser) => u.id === user.id || u.email.toLowerCase() === (user.email || '').toLowerCase()
+            );
+            if (matching) {
+              customRole = matching.role;
+              customName = matching.name;
+            }
+          }
+        } catch (e) {
+          console.warn('Shop user check notice in getCurrentUser:', e);
+        }
+      }
+
+      const roleStr = customRole || String(user.user_metadata?.role || '').toLowerCase();
       const role: UserRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
 
       return {
         id: user.id,
-        name: profile?.full_name || user.user_metadata?.full_name || user.email?.split('@')[0] || 'User',
+        name: customName || profile?.full_name || user.user_metadata?.full_name || user.email?.split('@')[0] || 'User',
         email: user.email || '',
         role,
         status: 'active',
@@ -101,87 +161,68 @@ class ShopRepository {
   public async checkAdminAuth(actionName: string): Promise<SystemUser> {
     const user = await this.getCurrentUser();
     if (!user) {
-      throw new Error('Fadlan marka hore gal nidaamka (Not Authenticated)');
-    }
-    if (user.role === 'seller') {
-      throw new Error(`Hawshan (${actionName}) waxaa u fasaxan kaliya Maamulaha (Admin). Seller / Iibiye wuxuu galayaa kaliya POS / Iibka.`);
-    }
-    if (user.role === 'reporter') {
-      throw new Error(`Hawshan (${actionName}) waxaa u fasaxan kaliya Maamulaha (Admin). Reporter waa Akhris-Kaliya (Read-Only).`);
+      throw new Error(`Fadlan gal nidaamka si aad u fuliso: ${actionName}`);
     }
     if (user.role !== 'admin') {
-      throw new Error(`Hawshan (${actionName}) waxaa u fasaxan kaliya Maamulaha (Admin).`);
-    }
-    if (user.status !== 'active') {
-      throw new Error('Koontadaadu ma firfircoona (Inactive)');
+      throw new Error(`Ma lihid ogolaansho (Admin kaliya ayaa qaban kara): ${actionName}`);
     }
     return user;
   }
 
   // ==========================================
-  // AUDIT LOGGING (Persisted in Supabase)
+  // AUDIT TRAIL LOGGING
   // ==========================================
   public async recordAuditLog(
     action: string,
     entityType: string,
-    entityId?: string,
-    previousValues?: Record<string, any>,
-    newValues?: Record<string, any>,
-    reason?: string
-  ): Promise<AuditLog> {
-    const currentUser = await this.getCurrentUser();
-    const log: AuditLog = {
-      id: generateId(),
-      user_id: currentUser?.id,
-      user_name: currentUser?.name || 'Admin',
-      user_role: currentUser?.role || 'admin',
-      action,
-      entity_type: entityType,
-      entity_id: entityId,
-      previous_values: previousValues,
-      new_values: newValues,
-      reason: reason || 'Wax ka beddel / Sixid toos ah',
-      created_at: new Date().toISOString(),
-    };
-
+    entityId: string,
+    previousValues?: any,
+    newValues?: any,
+    reason?: string,
+    details?: any
+  ): Promise<void> {
     try {
-      await supabase.from('audit_logs').insert([{
-        id: log.id,
-        user_id: log.user_id,
-        user_name: log.user_name,
-        user_role: log.user_role,
-        action: log.action,
-        entity_type: log.entity_type,
-        entity_id: log.entity_id,
-        previous_values: log.previous_values,
-        new_values: log.new_values,
-        reason: log.reason,
-        created_at: log.created_at,
-      }]);
-    } catch (err) {
-      console.warn('Audit log write catch:', err);
-    }
+      if (!isSupabaseConfigured) return;
+      const user = await this.getCurrentUser();
 
-    return log;
+      await supabase.from('audit_logs').insert([{
+        id: generateId(),
+        user_id: user?.id || null,
+        user_name: user?.name || 'Admin',
+        user_role: user?.role || 'admin',
+        action,
+        entity_type: entityType,
+        entity_id: entityId,
+        previous_values: previousValues || null,
+        new_values: newValues || null,
+        reason: reason || null,
+        details: details || null,
+        created_at: new Date().toISOString(),
+      }]);
+    } catch (e) {
+      console.warn('Could not record audit log:', e);
+    }
   }
 
   public async getAuditLogs(
-    search: string = '', 
-    entityFilter: string = 'all', 
-    actionFilter: string = 'all',
+    search: string = '',
+    entityFilter: string = '',
+    actionFilter: string = '',
     page: number = 1,
     pageSize: number = 50
   ): Promise<AuditLog[]> {
+    if (!isSupabaseConfigured) return [];
+
     let query = supabase
       .from('audit_logs')
       .select('*')
       .order('created_at', { ascending: false });
 
-    if (entityFilter && entityFilter !== 'all') {
+    if (entityFilter && entityFilter !== 'all' && entityFilter !== '') {
       query = query.eq('entity_type', entityFilter);
     }
 
-    if (actionFilter && actionFilter !== 'all') {
+    if (actionFilter && actionFilter !== 'all' && actionFilter !== '') {
       query = query.ilike('action', `%${actionFilter}%`);
     }
 
@@ -210,32 +251,40 @@ class ShopRepository {
       const { data, error } = await supabase
         .from('shops')
         .select('*')
+        .order('created_at', { ascending: true })
         .limit(1)
         .maybeSingle();
 
       if (error || !data) {
+        if (error) console.warn('[getSettings Warning]:', error.message);
         return { ...DEFAULT_SETTINGS };
       }
 
+      const s = data.settings || {};
+
       return {
-        shopName: data.name || DEFAULT_SETTINGS.shopName,
-        shopPhone: data.phone || DEFAULT_SETTINGS.shopPhone,
-        shopAddress: data.address || DEFAULT_SETTINGS.shopAddress,
-        currency: data.currency || DEFAULT_SETTINGS.currency,
-        receiptHeader: DEFAULT_SETTINGS.receiptHeader,
-        receiptFooter: DEFAULT_SETTINGS.receiptFooter,
-        lowStockEmailEnabled: true,
-        outOfStockEmailEnabled: true,
-        alertRecipientEmail: DEFAULT_SETTINGS.alertRecipientEmail,
-        debtOverdueDays: 7,
-        defaultPurchaseUnit: DEFAULT_SETTINGS.defaultPurchaseUnit,
-        defaultSellingUnit: DEFAULT_SETTINGS.defaultSellingUnit,
-        defaultConversionFactor: 50,
-        theme: 'light',
-        language: 'so',
-        dateFormat: 'DD/MM/YYYY',
+        shopName: data.name || s.shopName || DEFAULT_SETTINGS.shopName,
+        shopPhone: data.phone || s.shopPhone || DEFAULT_SETTINGS.shopPhone,
+        shopAddress: data.address || s.shopAddress || DEFAULT_SETTINGS.shopAddress,
+        currency: data.currency || s.currency || DEFAULT_SETTINGS.currency,
+        signatureUrl: s.signatureUrl || data.signature_url || '',
+        receiptHeader: s.receiptHeader ?? DEFAULT_SETTINGS.receiptHeader,
+        receiptFooter: s.receiptFooter ?? DEFAULT_SETTINGS.receiptFooter,
+        lowStockEmailEnabled: s.lowStockEmailEnabled ?? DEFAULT_SETTINGS.lowStockEmailEnabled,
+        outOfStockEmailEnabled: s.outOfStockEmailEnabled ?? DEFAULT_SETTINGS.outOfStockEmailEnabled,
+        alertRecipientEmail: s.alertRecipientEmail ?? DEFAULT_SETTINGS.alertRecipientEmail,
+        alertRecipientRoles: Array.isArray(s.alertRecipientRoles) ? s.alertRecipientRoles : (DEFAULT_SETTINGS.alertRecipientRoles || ['admin']),
+        alertRecipientUserIds: Array.isArray(s.alertRecipientUserIds) ? s.alertRecipientUserIds : [],
+        debtOverdueDays: Number(s.debtOverdueDays ?? DEFAULT_SETTINGS.debtOverdueDays),
+        defaultPurchaseUnit: s.defaultPurchaseUnit ?? DEFAULT_SETTINGS.defaultPurchaseUnit,
+        defaultSellingUnit: s.defaultSellingUnit ?? DEFAULT_SETTINGS.defaultSellingUnit,
+        defaultConversionFactor: Number(s.defaultConversionFactor ?? DEFAULT_SETTINGS.defaultConversionFactor),
+        theme: s.theme ?? 'light',
+        language: s.language ?? 'so',
+        dateFormat: s.dateFormat ?? 'DD/MM/YYYY',
       };
-    } catch {
+    } catch (e) {
+      console.warn('[getSettings Exception]:', e);
       return { ...DEFAULT_SETTINGS };
     }
   }
@@ -244,25 +293,55 @@ class ShopRepository {
     await this.checkAdminAuth('Wax ka beddelka Habaynta (Settings)');
 
     const current = await this.getSettings();
-    const updated = { ...current, ...updates };
+    const updated: ShopSettings = { ...current, ...updates };
 
-    const { data: existingShop } = await supabase.from('shops').select('id').limit(1).maybeSingle();
+    const { data: existingShop, error: fetchErr } = await supabase
+      .from('shops')
+      .select('*')
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (fetchErr) {
+      console.warn('[updateSettings fetch existingShop notice]:', fetchErr.message);
+    }
+
+    // Preserve existing internal JSON settings (such as variant_pricing, variant_fractions)
+    const existingJsonSettings = existingShop?.settings || {};
+    const mergedJsonSettings = {
+      ...existingJsonSettings,
+      ...updated,
+      signatureUrl: updated.signatureUrl || '',
+    };
+
+    const shopPayload: any = {
+      name: updated.shopName.trim(),
+      phone: updated.shopPhone.trim(),
+      address: updated.shopAddress.trim(),
+      currency: updated.currency.trim(),
+      settings: mergedJsonSettings,
+      updated_at: new Date().toISOString(),
+    };
 
     if (existingShop) {
-      await supabase.from('shops').update({
-        name: updated.shopName,
-        phone: updated.shopPhone,
-        address: updated.shopAddress,
-        currency: updated.currency,
-        updated_at: new Date().toISOString(),
-      }).eq('id', existingShop.id);
+      const { error: updateError } = await supabase
+        .from('shops')
+        .update(shopPayload)
+        .eq('id', existingShop.id);
+
+      if (updateError) {
+        console.error('[updateSettings Error]:', updateError);
+        throw new Error(`Khalad keydinta habaynta database-ka: ${updateError.message}`);
+      }
     } else {
-      await supabase.from('shops').insert([{
-        name: updated.shopName,
-        phone: updated.shopPhone,
-        address: updated.shopAddress,
-        currency: updated.currency,
-      }]);
+      const { error: insertError } = await supabase
+        .from('shops')
+        .insert([shopPayload]);
+
+      if (insertError) {
+        console.error('[insertSettings Error]:', insertError);
+        throw new Error(`Khalad abuurista habaynta database-ka: ${insertError.message}`);
+      }
     }
 
     await this.recordAuditLog(
@@ -275,6 +354,137 @@ class ShopRepository {
     );
 
     return updated;
+  }
+
+  // ==========================================
+  // RESEND EMAIL ALERTS & NOTIFICATIONS
+  // ==========================================
+  public async getAlertRecipients(settings?: ShopSettings): Promise<string[]> {
+    try {
+      const currentSettings = settings || await this.getSettings();
+      const emails = new Set<string>();
+
+      // 1. Resolve registered users by configured roles (Admin, Seller, Reporter)
+      const allowedRoles = currentSettings.alertRecipientRoles || ['admin'];
+      const users = await this.getUsers();
+
+      for (const u of users) {
+        if (allowedRoles.includes(u.role) && u.email && u.email.includes('@')) {
+          emails.add(u.email.trim().toLowerCase());
+        }
+        if (currentSettings.alertRecipientUserIds?.includes(u.id) && u.email && u.email.includes('@')) {
+          emails.add(u.email.trim().toLowerCase());
+        }
+      }
+
+      // 2. Add custom / direct recipient email if provided
+      if (currentSettings.alertRecipientEmail && currentSettings.alertRecipientEmail.includes('@')) {
+        emails.add(currentSettings.alertRecipientEmail.trim().toLowerCase());
+      }
+
+      return Array.from(emails);
+    } catch (e) {
+      console.warn('[getAlertRecipients error]:', e);
+      return [];
+    }
+  }
+
+  public async sendTestAlertEmail(recipientEmail?: string): Promise<{ success: boolean; messageId?: string; error?: string; recipients?: string[] }> {
+    const user = await this.checkAdminAuth('Diritaanka Email-ka Tijaabada Ah');
+    const settings = await this.getSettings();
+    
+    let targets: string[] = [];
+    if (recipientEmail && recipientEmail.includes('@')) {
+      targets = [recipientEmail.trim()];
+    } else {
+      targets = await this.getAlertRecipients(settings);
+    }
+
+    if (targets.length === 0) {
+      throw new Error('Fadlan geli ama dooro email sax ah oo loo diro tijaabada.');
+    }
+
+    const res = await fetch('/api/alerts/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        recipientEmails: targets,
+        shopName: settings.shopName,
+        adminName: user.name || 'Admin',
+      }),
+    });
+
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Diritaanka email-ka tijaabada ah wuu fashilmay');
+    }
+
+    return data;
+  }
+
+  public async triggerStockAlert(params: {
+    variantId: string;
+    productName: string;
+    variantName?: string;
+    currentStock: number;
+    minimumStock: number;
+    unit: string;
+    sku?: string;
+    barcode?: string;
+  }): Promise<void> {
+    try {
+      const settings = await this.getSettings();
+      const targets = await this.getAlertRecipients(settings);
+      if (targets.length === 0) return;
+
+      // Asynchronously call the stock alert API endpoint (non-blocking)
+      fetch('/api/alerts/stock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...params,
+          shopName: settings.shopName,
+          recipientEmails: targets,
+          lowStockEnabled: settings.lowStockEmailEnabled,
+          outOfStockEnabled: settings.outOfStockEmailEnabled,
+        }),
+      }).catch((err) => console.warn('[Stock Alert Notice]:', err));
+    } catch (e) {
+      console.warn('[triggerStockAlert error]:', e);
+    }
+  }
+
+  public async triggerDebtReminderAlert(debt: Debt): Promise<{ success: boolean; messageId?: string; error?: string; skipped?: boolean; reason?: string; recipients?: string[] }> {
+    try {
+      const settings = await this.getSettings();
+      const targets = await this.getAlertRecipients(settings);
+      if (targets.length === 0) {
+        return { success: false, error: 'Email-ka digniinta lama habayn' };
+      }
+
+      const res = await fetch('/api/alerts/debts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          debtId: debt.id,
+          recipientEmails: targets,
+          shopName: settings.shopName,
+          customerName: debt.customer?.name || 'Macmiil',
+          customerPhone: debt.customer?.phone || '',
+          originalAmount: debt.original_amount,
+          amountPaid: debt.amount_paid,
+          remainingBalance: debt.remaining_balance,
+          dueDate: debt.due_date,
+          currency: settings.currency || '$',
+          itemsSummary: debt.items_summary,
+        }),
+      });
+
+      return await res.json();
+    } catch (e: any) {
+      console.warn('[triggerDebtReminderAlert error]:', e);
+      return { success: false, error: e?.message || 'Error triggering debt alert' };
+    }
   }
 
   // ==========================================
@@ -703,19 +913,30 @@ class ShopRepository {
   private async getVariantMaps(): Promise<{
     fractionsMap: Record<string, { unit_division: number; min_sellable_qty: number }>;
     pricingMap: Record<string, { pricing_mode: 'fixed' | 'denomination'; sos_price?: number }>;
+    modelsMap: Record<string, {
+      management_mode?: ManagementMode;
+      source_quantity?: number;
+      source_unit?: string;
+      pack_count?: number;
+      selling_pack_unit?: string;
+      container_unit?: string;
+      container_capacity_liters?: number;
+      selling_options?: AmountSellingOption[];
+    }>;
   }> {
     try {
       const { data, error } = await supabase.from('shops').select('settings').limit(1).maybeSingle();
       if (!error && data && data.settings && typeof data.settings === 'object') {
         return {
           fractionsMap: (data.settings.variant_fractions || {}) as Record<string, { unit_division: number; min_sellable_qty: number }>,
-          pricingMap: (data.settings.variant_pricing || {}) as Record<string, { pricing_mode: 'fixed' | 'denomination'; sos_price?: number }>
+          pricingMap: (data.settings.variant_pricing || {}) as Record<string, { pricing_mode: 'fixed' | 'denomination'; sos_price?: number }>,
+          modelsMap: (data.settings.variant_models || {}) as Record<string, any>
         };
       }
     } catch (err) {
       console.warn('Error reading variant maps:', err);
     }
-    return { fractionsMap: {}, pricingMap: {} };
+    return { fractionsMap: {}, pricingMap: {}, modelsMap: {} };
   }
 
   private async getVariantFractionsMap(): Promise<Record<string, { unit_division: number; min_sellable_qty: number }>> {
@@ -776,13 +997,45 @@ class ShopRepository {
     }
   }
 
+  private async saveVariantModel(variantId: string, modelData: {
+    management_mode?: ManagementMode;
+    source_quantity?: number;
+    source_unit?: string;
+    pack_count?: number;
+    selling_pack_unit?: string;
+    container_unit?: string;
+    container_capacity_liters?: number;
+    selling_options?: AmountSellingOption[];
+  }): Promise<void> {
+    try {
+      const { data: shop } = await supabase.from('shops').select('id, settings').limit(1).maybeSingle();
+      if (shop) {
+        const currentSettings = typeof shop.settings === 'object' && shop.settings !== null ? shop.settings : {};
+        const updatedModels = {
+          ...(currentSettings.variant_models || {}),
+          [variantId]: modelData
+        };
+        await supabase.from('shops').update({
+          settings: {
+            ...currentSettings,
+            variant_models: updatedModels
+          }
+        }).eq('id', shop.id);
+      }
+    } catch (err) {
+      console.warn('Error saving variant model to shop settings:', err);
+    }
+  }
+
   private formatVariantWithFractions(
     v: any, 
     fractionsMap?: Record<string, any>,
-    pricingMap?: Record<string, any>
+    pricingMap?: Record<string, any>,
+    modelsMap?: Record<string, any>
   ): ProductVariant {
     const fraction = fractionsMap?.[v.id];
     const pricing = pricingMap?.[v.id];
+    const model = modelsMap?.[v.id];
 
     const unit_division = Number(v.unit_division) > 0 
       ? Number(v.unit_division) 
@@ -807,12 +1060,31 @@ class ShopRepository {
       ? Number(v.sos_price) 
       : (pricing?.sos_price && Number(pricing.sos_price) > 0 ? Number(pricing.sos_price) : undefined);
 
+    const management_mode: ManagementMode = (v.management_mode || model?.management_mode || 'standard') as ManagementMode;
+    const source_quantity = v.source_quantity !== undefined && v.source_quantity !== null ? Number(v.source_quantity) : model?.source_quantity;
+    const source_unit = v.source_unit || model?.source_unit;
+    const pack_count = v.pack_count !== undefined && v.pack_count !== null ? Number(v.pack_count) : model?.pack_count;
+    const selling_pack_unit = v.selling_pack_unit || model?.selling_pack_unit;
+    const container_unit = v.container_unit || model?.container_unit;
+    const container_capacity_liters = v.container_capacity_liters !== undefined && v.container_capacity_liters !== null ? Number(v.container_capacity_liters) : model?.container_capacity_liters;
+    const selling_options = Array.isArray(v.selling_options) && v.selling_options.length > 0 
+      ? v.selling_options 
+      : (Array.isArray(model?.selling_options) ? model.selling_options : undefined);
+
     return {
       ...v,
       unit_division,
       min_sellable_qty,
       pricing_mode,
       sos_price,
+      management_mode,
+      source_quantity,
+      source_unit,
+      pack_count,
+      selling_pack_unit,
+      container_unit,
+      container_capacity_liters,
+      selling_options,
       category: v.product?.category || v.category,
     };
   }
@@ -926,8 +1198,8 @@ class ShopRepository {
       .maybeSingle();
 
     if (error || !data) return null;
-    const { fractionsMap, pricingMap } = await this.getVariantMaps();
-    return this.formatVariantWithFractions(data, fractionsMap, pricingMap);
+    const { fractionsMap, pricingMap, modelsMap } = await this.getVariantMaps();
+    return this.formatVariantWithFractions(data, fractionsMap, pricingMap, modelsMap);
   }
 
   public async createProduct(
@@ -949,6 +1221,17 @@ class ShopRepository {
       minimum_stock: number;
       supplier_id?: string;
       image_url?: string;
+      management_mode?: ManagementMode;
+      source_quantity?: number;
+      source_unit?: string;
+      pack_count?: number;
+      selling_pack_unit?: string;
+      container_unit?: string;
+      container_capacity_liters?: number;
+      selling_options?: AmountSellingOption[];
+      initial_containers?: number;
+      batch_cost?: number;
+      batch_reference?: string;
     },
     reason?: string
   ): Promise<{ product: Product; variant: ProductVariant }> {
@@ -977,33 +1260,63 @@ class ShopRepository {
       throw new Error(`Khalad abuurista alaabta: ${prodErr.message}`);
     }
 
-    const division = Math.max(1, Number(variantData.unit_division) || 1);
-    const minSellable = variantData.min_sellable_qty !== undefined && Number(variantData.min_sellable_qty) > 0
+    const managementMode: ManagementMode = variantData.management_mode || 'standard';
+    let division = Math.max(1, Number(variantData.unit_division) || 1);
+    let minSellable = variantData.min_sellable_qty !== undefined && Number(variantData.min_sellable_qty) > 0
       ? Number(variantData.min_sellable_qty)
       : calculateMinSellableQty(division);
+
+    let purchaseUnit = variantData.purchase_unit || 'jawan';
+    let sellingUnit = variantData.selling_unit || 'kg';
+    let conversionFactor = Number(variantData.conversion_factor) || 1;
+    let initialStock = Number(variantData.stock_quantity) || 0;
+
+    if (managementMode === 'pack_based') {
+      division = 1;
+      minSellable = 1;
+      sellingUnit = variantData.selling_pack_unit || 'bac';
+      purchaseUnit = variantData.source_unit || 'g';
+      initialStock = Number(variantData.pack_count) || initialStock;
+    } else if (managementMode === 'amount_based') {
+      sellingUnit = 'liter';
+      purchaseUnit = variantData.container_unit || 'caag';
+      conversionFactor = Number(variantData.container_capacity_liters) || 20;
+      if (variantData.initial_containers && variantData.initial_containers > 0) {
+        initialStock = Number((variantData.initial_containers * conversionFactor).toFixed(4));
+      }
+      minSellable = minSellable > 0 ? minSellable : 0.25;
+    }
 
     const pricingMode: 'fixed' | 'denomination' = variantData.pricing_mode === 'denomination' ? 'denomination' : 'fixed';
     const sosPrice = Number(variantData.sos_price) > 0 ? Number(variantData.sos_price) : null;
 
-    const newVariant = {
+    const newVariant: any = {
       id: variantId,
       product_id: productId,
       variant_name: variantData.variant_name.trim() || 'Default',
       sku: variantData.sku?.trim() || null,
       barcode: variantData.barcode?.trim() || null,
       buy_price: Number(variantData.buy_price) || 0,
-      purchase_unit: variantData.purchase_unit || 'jawan',
+      purchase_unit: purchaseUnit,
       sell_price: Number(variantData.sell_price) || 0,
-      selling_unit: variantData.selling_unit || 'kg',
-      conversion_factor: Number(variantData.conversion_factor) || 1,
+      selling_unit: sellingUnit,
+      conversion_factor: conversionFactor,
       unit_division: division,
       min_sellable_qty: minSellable,
       pricing_mode: pricingMode,
       sos_price: sosPrice,
-      stock_quantity: Number(variantData.stock_quantity) || 0,
+      stock_quantity: initialStock,
       minimum_stock: Number(variantData.minimum_stock) || 10,
       supplier_id: variantData.supplier_id || null,
       image_url: variantData.image_url || null,
+      management_mode: managementMode,
+      source_quantity: variantData.source_quantity !== undefined ? Number(variantData.source_quantity) : null,
+      source_unit: variantData.source_unit || null,
+      pack_count: variantData.pack_count !== undefined ? Number(variantData.pack_count) : null,
+      selling_pack_unit: variantData.selling_pack_unit || null,
+      container_unit: variantData.container_unit || null,
+      container_capacity_liters: variantData.container_capacity_liters !== undefined ? Number(variantData.container_capacity_liters) : null,
+      selling_options: variantData.selling_options || null,
       is_active: true,
       is_pending: false,
       created_at: new Date().toISOString(),
@@ -1017,16 +1330,37 @@ class ShopRepository {
       .select()
       .single();
 
-    if (varErr && (varErr.message?.includes('min_sellable_qty') || varErr.message?.includes('unit_division') || varErr.message?.includes('pricing_mode') || varErr.message?.includes('sos_price') || varErr.code === 'PGRST204')) {
-      console.warn('[Supabase Schema] Column min_sellable_qty/pricing_mode not in schema cache. Saving variant and falling back...');
-      const { unit_division, min_sellable_qty, pricing_mode, sos_price, ...fallbackVariant } = newVariant;
+    if (varErr) {
+      console.warn('[Supabase Schema] Retry saving base variant columns...');
+      const { 
+        unit_division, min_sellable_qty, pricing_mode, sos_price,
+        management_mode, source_quantity, source_unit, pack_count, selling_pack_unit,
+        container_unit, container_capacity_liters, selling_options,
+        ...fallbackVariant 
+      } = newVariant;
+
       const fallbackRes = await supabase
         .from('product_variants')
         .insert([fallbackVariant])
         .select()
         .single();
+
       if (!fallbackRes.error && fallbackRes.data) {
-        varCreated = { ...fallbackRes.data, unit_division, min_sellable_qty, pricing_mode: pricingMode, sos_price: sosPrice || undefined };
+        varCreated = { 
+          ...fallbackRes.data, 
+          unit_division, 
+          min_sellable_qty, 
+          pricing_mode: pricingMode, 
+          sos_price: sosPrice || undefined,
+          management_mode: managementMode,
+          source_quantity: variantData.source_quantity,
+          source_unit: variantData.source_unit,
+          pack_count: variantData.pack_count,
+          selling_pack_unit: variantData.selling_pack_unit,
+          container_unit: variantData.container_unit,
+          container_capacity_liters: variantData.container_capacity_liters,
+          selling_options: variantData.selling_options,
+        };
         varErr = null;
       } else if (fallbackRes.error) {
         varErr = fallbackRes.error;
@@ -1039,16 +1373,55 @@ class ShopRepository {
       throw new Error(`Khalad abuurista variant: ${varErr.message}`);
     }
 
-    // Persist fractional division & pricing mode directly to Supabase settings store
+    // Persist fractional division, pricing mode & model data directly to Supabase settings store
     await this.saveVariantFraction(variantId, division, minSellable);
     await this.saveVariantPricing(variantId, pricingMode, sosPrice || undefined);
-    varCreated = this.formatVariantWithFractions({ 
-      ...varCreated, 
-      unit_division: division, 
-      min_sellable_qty: minSellable,
-      pricing_mode: pricingMode,
-      sos_price: sosPrice || undefined,
+    await this.saveVariantModel(variantId, {
+      management_mode: managementMode,
+      source_quantity: variantData.source_quantity,
+      source_unit: variantData.source_unit,
+      pack_count: variantData.pack_count,
+      selling_pack_unit: variantData.selling_pack_unit,
+      container_unit: variantData.container_unit,
+      container_capacity_liters: variantData.container_capacity_liters,
+      selling_options: variantData.selling_options,
     });
+
+    const { fractionsMap, pricingMap, modelsMap } = await this.getVariantMaps();
+    varCreated = this.formatVariantWithFractions(varCreated, fractionsMap, pricingMap, modelsMap);
+
+    // If amount_based with initial stock, create initial batch record
+    if (managementMode === 'amount_based' && initialStock > 0) {
+      const containerCount = variantData.initial_containers || Number((initialStock / conversionFactor).toFixed(2));
+      const totalBatchCost = variantData.batch_cost !== undefined && Number(variantData.batch_cost) > 0
+        ? Number(variantData.batch_cost)
+        : Number((variantData.buy_price * containerCount).toFixed(2));
+      const costPerLiter = initialStock > 0 ? Number((totalBatchCost / initialStock).toFixed(4)) : 0;
+
+      const batchPayload: ProductBatch = {
+        id: generateId(),
+        product_variant_id: variantId,
+        batch_number: variantData.batch_reference?.trim() || `DUF-${Date.now().toString().slice(-4)}`,
+        container_count: containerCount,
+        liters_per_container: conversionFactor,
+        total_liters: initialStock,
+        remaining_quantity: initialStock,
+        total_purchase_cost: totalBatchCost,
+        cost_per_liter: costPerLiter,
+        cost_currency: '$',
+        supplier_id: variantData.supplier_id || null,
+        status: 'active',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      try {
+        await supabase.from('product_batches').insert([batchPayload]);
+      } catch (bErr) {
+        console.warn('Fallback saving batch to settings:', bErr);
+      }
+      await this.saveProductBatchToSettings(batchPayload);
+    }
 
     if (newVariant.stock_quantity > 0) {
       await supabase.from('stock_movements').insert([{
@@ -1116,17 +1489,37 @@ class ShopRepository {
       cleanSupplierId = (rawSuppId && typeof rawSuppId === 'string' && rawSuppId.trim().length > 0) ? rawSuppId.trim() : null;
     }
 
-    const division = updates.unit_division !== undefined 
+    const managementMode: ManagementMode = updates.management_mode || updates.managementMode || prev.management_mode || 'standard';
+
+    let division = updates.unit_division !== undefined 
       ? Math.max(1, Number(updates.unit_division) || 1) 
       : (updates.unitDivision !== undefined 
           ? Math.max(1, Number(updates.unitDivision) || 1) 
           : Math.max(1, Number(prev.unit_division) || 1));
 
-    const minSellable = updates.min_sellable_qty !== undefined && Number(updates.min_sellable_qty) > 0
+    let minSellable = updates.min_sellable_qty !== undefined && Number(updates.min_sellable_qty) > 0
       ? Number(updates.min_sellable_qty)
       : (updates.minSellableQty !== undefined && Number(updates.minSellableQty) > 0
         ? Number(updates.minSellableQty)
         : (prev.min_sellable_qty ? Number(prev.min_sellable_qty) : calculateMinSellableQty(division)));
+
+    let purchaseUnit = updates.purchase_unit || updates.purchaseUnit || prev.purchase_unit || 'jawan';
+    let sellingUnit = updates.selling_unit || updates.sellingUnit || prev.selling_unit || 'kg';
+    let conversionFactor = updates.conversion_factor !== undefined ? Number(updates.conversion_factor) : (updates.conversionFactor !== undefined ? Number(updates.conversionFactor) : Number(prev.conversion_factor || 1));
+
+    if (managementMode === 'pack_based') {
+      division = 1;
+      minSellable = 1;
+      sellingUnit = updates.selling_pack_unit || updates.sellingPackUnit || prev.selling_pack_unit || sellingUnit || 'bac';
+      purchaseUnit = updates.source_unit || updates.sourceUnit || prev.source_unit || purchaseUnit || 'g';
+    } else if (managementMode === 'amount_based') {
+      sellingUnit = 'liter';
+      purchaseUnit = updates.container_unit || updates.containerUnit || prev.container_unit || purchaseUnit || 'caag';
+      conversionFactor = updates.container_capacity_liters !== undefined 
+        ? Number(updates.container_capacity_liters) 
+        : (updates.containerCapacityLiters !== undefined ? Number(updates.containerCapacityLiters) : Number(prev.container_capacity_liters || conversionFactor || 20));
+      minSellable = minSellable > 0 ? minSellable : 0.25;
+    }
 
     const pricingMode = updates.pricing_mode || updates.pricingMode;
     const sosPrice = updates.sos_price !== undefined ? updates.sos_price : updates.sosPrice;
@@ -1136,16 +1529,24 @@ class ShopRepository {
       sku: updates.sku !== undefined ? (typeof updates.sku === 'string' && updates.sku.trim() ? updates.sku.trim() : null) : (prev.sku || null),
       barcode: updates.barcode !== undefined ? (typeof updates.barcode === 'string' && updates.barcode.trim() ? updates.barcode.trim() : null) : (prev.barcode || null),
       buy_price: updates.buy_price !== undefined ? Number(updates.buy_price) : (updates.buyPrice !== undefined ? Number(updates.buyPrice) : Number(prev.buy_price || 0)),
-      purchase_unit: updates.purchase_unit || updates.purchaseUnit || prev.purchase_unit || 'jawan',
+      purchase_unit: purchaseUnit,
       sell_price: updates.sell_price !== undefined ? Number(updates.sell_price) : (updates.sellPrice !== undefined ? Number(updates.sellPrice) : Number(prev.sell_price || 0)),
-      selling_unit: updates.selling_unit || updates.sellingUnit || prev.selling_unit || 'kg',
-      conversion_factor: updates.conversion_factor !== undefined ? Number(updates.conversion_factor) : (updates.conversionFactor !== undefined ? Number(updates.conversionFactor) : Number(prev.conversion_factor || 1)),
+      selling_unit: sellingUnit,
+      conversion_factor: conversionFactor,
       unit_division: division,
       min_sellable_qty: minSellable,
       pricing_mode: pricingMode ? (pricingMode === 'denomination' ? 'denomination' : 'fixed') : (prev.pricing_mode || 'fixed'),
       sos_price: sosPrice !== undefined ? (Number(sosPrice) > 0 ? Number(sosPrice) : null) : (prev.sos_price || null),
       minimum_stock: updates.minimum_stock !== undefined ? Number(updates.minimum_stock) : (updates.minimumStock !== undefined ? Number(updates.minimumStock) : Number(prev.minimum_stock || 0)),
       supplier_id: cleanSupplierId,
+      management_mode: managementMode,
+      source_quantity: updates.source_quantity !== undefined ? Number(updates.source_quantity) : (updates.sourceQuantity !== undefined ? Number(updates.sourceQuantity) : prev.source_quantity),
+      source_unit: updates.source_unit || updates.sourceUnit || prev.source_unit || null,
+      pack_count: updates.pack_count !== undefined ? Number(updates.pack_count) : (updates.packCount !== undefined ? Number(updates.packCount) : prev.pack_count),
+      selling_pack_unit: updates.selling_pack_unit || updates.sellingPackUnit || prev.selling_pack_unit || null,
+      container_unit: updates.container_unit || updates.containerUnit || prev.container_unit || null,
+      container_capacity_liters: updates.container_capacity_liters !== undefined ? Number(updates.container_capacity_liters) : (updates.containerCapacityLiters !== undefined ? Number(updates.containerCapacityLiters) : prev.container_capacity_liters),
+      selling_options: updates.selling_options || updates.sellingOptions || prev.selling_options || null,
       updated_at: new Date().toISOString(),
     };
 
@@ -1156,9 +1557,14 @@ class ShopRepository {
       .select('*, product:products(*, category:categories(*)), supplier:suppliers(*)')
       .single();
 
-    if (error && (error.message?.includes('min_sellable_qty') || error.message?.includes('unit_division') || error.message?.includes('pricing_mode') || error.message?.includes('sos_price') || error.code === 'PGRST204')) {
-      console.warn('[Supabase Schema] Column min_sellable_qty/pricing_mode not in schema cache during update. Retrying without extra columns...');
-      const { unit_division, min_sellable_qty, pricing_mode, sos_price, ...fallbackUpdates } = variantUpdates;
+    if (error) {
+      console.warn('[Supabase Schema] Column not in schema cache during update. Retrying without extra columns...');
+      const { 
+        unit_division, min_sellable_qty, pricing_mode, sos_price,
+        management_mode, source_quantity, source_unit, pack_count, selling_pack_unit,
+        container_unit, container_capacity_liters, selling_options,
+        ...fallbackUpdates 
+      } = variantUpdates;
       const retryRes = await supabase
         .from('product_variants')
         .update(fallbackUpdates)
@@ -1166,7 +1572,21 @@ class ShopRepository {
         .select('*, product:products(*, category:categories(*)), supplier:suppliers(*)')
         .single();
       if (!retryRes.error && retryRes.data) {
-        updated = { ...retryRes.data, unit_division, min_sellable_qty, pricing_mode: variantUpdates.pricing_mode, sos_price: variantUpdates.sos_price || undefined };
+        updated = { 
+          ...retryRes.data, 
+          unit_division, 
+          min_sellable_qty, 
+          pricing_mode: variantUpdates.pricing_mode, 
+          sos_price: variantUpdates.sos_price || undefined,
+          management_mode: variantUpdates.management_mode,
+          source_quantity: variantUpdates.source_quantity,
+          source_unit: variantUpdates.source_unit,
+          pack_count: variantUpdates.pack_count,
+          selling_pack_unit: variantUpdates.selling_pack_unit,
+          container_unit: variantUpdates.container_unit,
+          container_capacity_liters: variantUpdates.container_capacity_liters,
+          selling_options: variantUpdates.selling_options,
+        };
         error = null;
       } else if (retryRes.error) {
         error = retryRes.error;
@@ -1177,15 +1597,26 @@ class ShopRepository {
       throw new Error(`Khalad beddelka variant: ${error.message}`);
     }
 
-    // Persist fractional division & pricing mode directly to Supabase settings store
+    // Persist fractional division & pricing mode & model data directly to Supabase settings store
     await this.saveVariantFraction(id, division, minSellable);
     if (pricingMode !== undefined || sosPrice !== undefined) {
       const modeToSave = pricingMode === 'denomination' ? 'denomination' : (pricingMode === 'fixed' ? 'fixed' : (prev.pricing_mode || 'fixed'));
       const sosToSave = sosPrice !== undefined ? (Number(sosPrice) > 0 ? Number(sosPrice) : undefined) : prev.sos_price;
       await this.saveVariantPricing(id, modeToSave, sosToSave);
     }
-    const { fractionsMap, pricingMap } = await this.getVariantMaps();
-    updated = this.formatVariantWithFractions(updated, fractionsMap, pricingMap);
+    await this.saveVariantModel(id, {
+      management_mode: variantUpdates.management_mode,
+      source_quantity: variantUpdates.source_quantity,
+      source_unit: variantUpdates.source_unit,
+      pack_count: variantUpdates.pack_count,
+      selling_pack_unit: variantUpdates.selling_pack_unit,
+      container_unit: variantUpdates.container_unit,
+      container_capacity_liters: variantUpdates.container_capacity_liters,
+      selling_options: variantUpdates.selling_options,
+    });
+
+    const { fractionsMap, pricingMap, modelsMap } = await this.getVariantMaps();
+    updated = this.formatVariantWithFractions(updated, fractionsMap, pricingMap, modelsMap);
 
     await this.recordAuditLog(
       'EDIT_VARIANT',
@@ -1277,6 +1708,20 @@ class ShopRepository {
       reason
     );
 
+    // Trigger email alert if stock dropped to or below minimum stock threshold
+    if (newQty <= Number(variant.minimum_stock || 10)) {
+      this.triggerStockAlert({
+        variantId: variant.id,
+        productName: variant.product?.name || 'Alaab',
+        variantName: variant.variant_name || 'Default',
+        currentStock: newQty,
+        minimumStock: Number(variant.minimum_stock || 10),
+        unit: variant.selling_unit || 'kg',
+        sku: variant.sku,
+        barcode: variant.barcode,
+      });
+    }
+
     return {
       success: true,
       variant_id: variantId,
@@ -1305,17 +1750,69 @@ class ShopRepository {
       minimumStock?: number;
       supplierId?: string;
       categoryId?: string;
+      management_mode?: ManagementMode;
+      managementMode?: ManagementMode;
+      source_quantity?: number;
+      sourceQuantity?: number;
+      source_unit?: string;
+      sourceUnit?: string;
+      pack_count?: number;
+      packCount?: number;
+      selling_pack_unit?: string;
+      sellingPackUnit?: string;
+      container_unit?: string;
+      containerUnit?: string;
+      container_capacity_liters?: number;
+      containerCapacityLiters?: number;
+      initial_containers?: number;
+      container_count?: number;
+      containerCount?: number;
+      total_purchase_cost?: number;
+      totalPurchaseCost?: number;
+      batch_total_cost?: number;
+      batch_cost?: number;
+      batchCost?: number;
+      batch_reference?: string;
+      batchReference?: string;
+      selling_options?: AmountSellingOption[];
+      sellingOptions?: AmountSellingOption[];
     },
     reason?: string
-  ): Promise<{ success: boolean; variant_id: string }> {
+  ): Promise<{ success: boolean; variant_id: string; batch_id?: string }> {
     await this.checkAdminAuth('Soo galis Alaab (Stock In)');
 
-    const division = Math.max(1, Number(data.unitDivision) || 1);
-    const minSellable = data.minSellableQty !== undefined && Number(data.minSellableQty) > 0
+    const mMode: ManagementMode = data.management_mode || data.managementMode || 'standard';
+    let division = Math.max(1, Number(data.unitDivision) || 1);
+    let minSellable = data.minSellableQty !== undefined && Number(data.minSellableQty) > 0
       ? Number(data.minSellableQty)
       : calculateMinSellableQty(division);
     const pMode = (data.pricing_mode || data.pricingMode) === 'denomination' ? 'denomination' : 'fixed';
     const sPrice = Number(data.sos_price || data.sosPrice) > 0 ? Number(data.sos_price || data.sosPrice) : undefined;
+
+    let purchaseUnit = data.purchaseUnit || 'jawan';
+    let sellingUnit = data.sellingUnit || 'kg';
+    let conversionFactor = Number(data.conversionFactor) || 1;
+    let addedQtyInSelling = Number((data.quantity * conversionFactor).toFixed(4));
+    let batchTotalCost = Number(data.total_purchase_cost || data.totalPurchaseCost || data.batch_cost || data.batchCost || 0);
+
+    if (mMode === 'pack_based') {
+      division = 1;
+      minSellable = 1;
+      sellingUnit = data.selling_pack_unit || data.sellingPackUnit || data.sellingUnit || 'bac';
+      purchaseUnit = data.source_unit || data.sourceUnit || data.purchaseUnit || 'g';
+      addedQtyInSelling = Number(data.pack_count || data.packCount || data.quantity);
+    } else if (mMode === 'amount_based') {
+      sellingUnit = 'liter';
+      purchaseUnit = data.container_unit || data.containerUnit || data.purchaseUnit || 'caag';
+      const containerCapacity = Number(data.container_capacity_liters || data.containerCapacityLiters || conversionFactor || 20);
+      conversionFactor = containerCapacity;
+      const containers = Number(data.container_count || data.containerCount || data.initial_containers || data.quantity || 1);
+      addedQtyInSelling = Number((containers * containerCapacity).toFixed(4));
+      if (!batchTotalCost || batchTotalCost <= 0) {
+        batchTotalCost = Number((data.buyPrice * containers).toFixed(2));
+      }
+      minSellable = minSellable > 0 ? minSellable : 0.25;
+    }
 
     // Search for existing product & variant
     const { data: existingProds } = await supabase
@@ -1326,6 +1823,7 @@ class ShopRepository {
 
     let productId = existingProds?.[0]?.id;
     let variantId: string | null = null;
+    let createdBatchId: string | undefined = undefined;
 
     if (productId) {
       const { data: existingVars } = await supabase
@@ -1336,55 +1834,118 @@ class ShopRepository {
         .limit(1);
 
       if (existingVars?.[0]) {
-        variantId = existingVars[0].id;
+        const vId = existingVars[0].id;
+        variantId = vId;
         const currentVar = existingVars[0];
-        const addedQtyInSelling = Number((data.quantity * data.conversionFactor).toFixed(4));
         const prevStock = Number(currentVar.stock_quantity);
         const newStock = Number((prevStock + addedQtyInSelling).toFixed(4));
 
+        const effectiveBuyPrice = (mMode === 'amount_based' && addedQtyInSelling > 0 && batchTotalCost > 0)
+          ? Number((batchTotalCost / addedQtyInSelling).toFixed(4))
+          : data.buyPrice;
+
         const updatePayload: any = {
           stock_quantity: newStock,
-          buy_price: data.buyPrice,
+          buy_price: effectiveBuyPrice,
           sell_price: data.sellPrice,
-          purchase_unit: data.purchaseUnit || currentVar.purchase_unit,
-          selling_unit: data.sellingUnit || currentVar.selling_unit,
-          conversion_factor: data.conversionFactor || currentVar.conversion_factor,
+          purchase_unit: purchaseUnit,
+          selling_unit: sellingUnit,
+          conversion_factor: conversionFactor,
           unit_division: division,
           min_sellable_qty: minSellable,
           pricing_mode: pMode,
           sos_price: sPrice || null,
           minimum_stock: data.minimumStock || currentVar.minimum_stock,
           supplier_id: data.supplierId || currentVar.supplier_id,
+          management_mode: mMode,
+          source_quantity: data.source_quantity || data.sourceQuantity || currentVar.source_quantity,
+          source_unit: data.source_unit || data.sourceUnit || currentVar.source_unit,
+          pack_count: data.pack_count || data.packCount || currentVar.pack_count,
+          selling_pack_unit: data.selling_pack_unit || data.sellingPackUnit || currentVar.selling_pack_unit,
+          container_unit: data.container_unit || data.containerUnit || currentVar.container_unit,
+          container_capacity_liters: data.container_capacity_liters || data.containerCapacityLiters || currentVar.container_capacity_liters,
+          selling_options: data.selling_options || data.sellingOptions || currentVar.selling_options,
           updated_at: new Date().toISOString(),
         };
 
-        let { error: stockUpErr } = await supabase.from('product_variants').update(updatePayload).eq('id', variantId);
-        if (stockUpErr && (stockUpErr.message?.includes('min_sellable_qty') || stockUpErr.message?.includes('unit_division') || stockUpErr.message?.includes('pricing_mode') || stockUpErr.message?.includes('sos_price') || stockUpErr.code === 'PGRST204')) {
-          const { unit_division, min_sellable_qty, pricing_mode, sos_price, ...fallbackStockPayload } = updatePayload;
-          await supabase.from('product_variants').update(fallbackStockPayload).eq('id', variantId);
+        let { error: stockUpErr } = await supabase.from('product_variants').update(updatePayload).eq('id', vId);
+        if (stockUpErr) {
+          const { 
+            unit_division, min_sellable_qty, pricing_mode, sos_price,
+            management_mode, source_quantity, source_unit, pack_count, selling_pack_unit,
+            container_unit, container_capacity_liters, selling_options,
+            ...fallbackStockPayload 
+          } = updatePayload;
+          await supabase.from('product_variants').update(fallbackStockPayload).eq('id', vId);
         }
 
-        // Persist fractional division & pricing mode directly to Supabase settings store
-        await this.saveVariantFraction(existingVars[0].id, division, minSellable);
+        // Persist fractional division, pricing mode & model data
+        await this.saveVariantFraction(vId, division, minSellable);
         if (data.pricing_mode || data.pricingMode || data.sos_price || data.sosPrice) {
-          await this.saveVariantPricing(existingVars[0].id, pMode, sPrice);
+          await this.saveVariantPricing(vId, pMode, sPrice);
+        }
+        await this.saveVariantModel(vId, {
+          management_mode: mMode,
+          source_quantity: updatePayload.source_quantity,
+          source_unit: updatePayload.source_unit,
+          pack_count: updatePayload.pack_count,
+          selling_pack_unit: updatePayload.selling_pack_unit,
+          container_unit: updatePayload.container_unit,
+          container_capacity_liters: updatePayload.container_capacity_liters,
+          selling_options: updatePayload.selling_options,
+        });
+
+        // If amount_based oil, create a separate batch record
+        if (mMode === 'amount_based') {
+          const containers = Number(data.container_count || data.containerCount || data.initial_containers || data.quantity || 1);
+          const containerCapacity = Number(data.container_capacity_liters || data.containerCapacityLiters || conversionFactor || 20);
+          const costPerL = addedQtyInSelling > 0 ? Number((batchTotalCost / addedQtyInSelling).toFixed(4)) : effectiveBuyPrice;
+          const batchNumber = data.batch_reference || data.batchReference || `DUF-${Date.now().toString().slice(-4)}`;
+
+          const batchRecord: ProductBatch = {
+            id: generateId(),
+            product_variant_id: vId,
+            batch_number: batchNumber,
+            container_count: containers,
+            liters_per_container: containerCapacity,
+            total_liters: addedQtyInSelling,
+            remaining_quantity: addedQtyInSelling,
+            total_purchase_cost: batchTotalCost,
+            cost_per_liter: costPerL,
+            cost_currency: '$',
+            supplier_id: data.supplierId || currentVar.supplier_id || null,
+            status: 'active',
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+
+          try {
+            await supabase.from('product_batches').insert([batchRecord]);
+          } catch (bErr) {
+            console.warn('Fallback saving batch to settings:', bErr);
+          }
+          await this.saveProductBatchToSettings(batchRecord);
+          createdBatchId = batchRecord.id;
         }
 
         await supabase.from('stock_movements').insert([{
           id: generateId(),
-          product_variant_id: variantId,
+          product_variant_id: vId,
           type: 'purchase',
           quantity: addedQtyInSelling,
           previous_quantity: prevStock,
           new_quantity: newStock,
-          unit: data.sellingUnit,
-          reference_type: 'manual_stock_in',
-          notes: reason || `Soo galis toos ah: +${data.quantity} ${data.purchaseUnit}`,
+          unit: sellingUnit,
+          reference_type: mMode === 'amount_based' ? 'product_batch' : 'manual_stock_in',
+          reference_id: createdBatchId || null,
+          notes: reason || (mMode === 'amount_based' 
+            ? `Soo galis dufcad saliid: +${addedQtyInSelling}L ($${batchTotalCost})` 
+            : (mMode === 'pack_based' ? `Soo galis baakado: +${addedQtyInSelling} ${sellingUnit}` : `Soo galis toos ah: +${data.quantity} ${purchaseUnit}`)),
           created_at: new Date().toISOString(),
         }]);
 
-        await this.recordAuditLog('INCOMING_STOCK', 'product_variant', existingVars[0].id, currentVar, { stock_quantity: newStock }, reason);
-        return { success: true, variant_id: existingVars[0].id };
+        await this.recordAuditLog('INCOMING_STOCK', 'product_variant', vId, currentVar, { stock_quantity: newStock }, reason);
+        return { success: true, variant_id: vId, batch_id: createdBatchId };
       }
     }
 
@@ -1394,17 +1955,28 @@ class ShopRepository {
       {
         variant_name: data.variantName,
         buy_price: data.buyPrice,
-        purchase_unit: data.purchaseUnit,
+        purchase_unit: purchaseUnit,
         sell_price: data.sellPrice,
-        selling_unit: data.sellingUnit,
-        conversion_factor: data.conversionFactor,
+        selling_unit: sellingUnit,
+        conversion_factor: conversionFactor,
         unit_division: division,
         min_sellable_qty: minSellable,
         pricing_mode: pMode,
         sos_price: sPrice,
-        stock_quantity: Number((data.quantity * data.conversionFactor).toFixed(4)),
+        stock_quantity: addedQtyInSelling,
         minimum_stock: data.minimumStock || 10,
         supplier_id: data.supplierId,
+        management_mode: mMode,
+        source_quantity: data.source_quantity || data.sourceQuantity,
+        source_unit: data.source_unit || data.sourceUnit,
+        pack_count: data.pack_count || data.packCount,
+        selling_pack_unit: data.selling_pack_unit || data.sellingPackUnit,
+        container_unit: data.container_unit || data.containerUnit,
+        container_capacity_liters: data.container_capacity_liters || data.containerCapacityLiters,
+        selling_options: data.selling_options || data.sellingOptions,
+        initial_containers: data.container_count || data.containerCount || data.initial_containers || data.quantity,
+        batch_cost: batchTotalCost,
+        batch_reference: data.batch_reference || data.batchReference,
       },
       reason
     );
@@ -1432,6 +2004,26 @@ class ShopRepository {
       minimumStock?: number;
       categoryId?: string;
       supplierId?: string;
+      management_mode?: ManagementMode;
+      managementMode?: ManagementMode;
+      source_quantity?: number;
+      sourceQuantity?: number;
+      source_unit?: string;
+      sourceUnit?: string;
+      pack_count?: number;
+      packCount?: number;
+      selling_pack_unit?: string;
+      sellingPackUnit?: string;
+      container_unit?: string;
+      containerUnit?: string;
+      container_capacity_liters?: number;
+      containerCapacityLiters?: number;
+      selling_options?: AmountSellingOption[];
+      sellingOptions?: AmountSellingOption[];
+      batch_cost?: number;
+      batchCost?: number;
+      batch_reference?: string;
+      batchReference?: string;
     },
     reason?: string
   ): Promise<ProductVariant> {
@@ -1454,12 +2046,32 @@ class ShopRepository {
       }).eq('id', variant.product_id);
     }
 
-    const division = Math.max(1, Number(data.unitDivision) || Number(variant.unit_division) || 1);
-    const minSellable = data.minSellableQty !== undefined && Number(data.minSellableQty) > 0
+    const mMode: ManagementMode = data.managementMode || variant.management_mode || 'standard';
+
+    let division = Math.max(1, Number(data.unitDivision) || Number(variant.unit_division) || 1);
+    let minSellable = data.minSellableQty !== undefined && Number(data.minSellableQty) > 0
       ? Number(data.minSellableQty)
       : calculateMinSellableQty(division);
 
-    const addedQty = Number(((Number(data.quantityToAdd || 0)) * (Number(data.conversionFactor) || 1)).toFixed(4));
+    let purchaseUnit = data.purchaseUnit || variant.purchase_unit || 'jawan';
+    let sellingUnit = data.sellingUnit || variant.selling_unit || 'kg';
+    let conversionFactor = Number(data.conversionFactor) || Number(variant.conversion_factor) || 1;
+    let addedQty = Number(((Number(data.quantityToAdd || 0)) * conversionFactor).toFixed(4));
+
+    if (mMode === 'pack_based') {
+      division = 1;
+      minSellable = 1;
+      sellingUnit = data.sellingPackUnit || variant.selling_pack_unit || sellingUnit || 'bac';
+      purchaseUnit = data.sourceUnit || variant.source_unit || purchaseUnit || 'g';
+      addedQty = Number(data.packCount || data.quantityToAdd || 0);
+    } else if (mMode === 'amount_based') {
+      sellingUnit = 'liter';
+      purchaseUnit = data.containerUnit || variant.container_unit || purchaseUnit || 'caag';
+      conversionFactor = Number(data.containerCapacityLiters || variant.container_capacity_liters || conversionFactor || 20);
+      addedQty = Number(((Number(data.quantityToAdd || 0)) * conversionFactor).toFixed(4));
+      minSellable = minSellable > 0 ? minSellable : 0.25;
+    }
+
     const prevStock = Number(variant.stock_quantity || 0);
     const newStock = Number((prevStock + addedQty).toFixed(4));
     const cleanSuppId = data.supplierId && typeof data.supplierId === 'string' && data.supplierId.trim().length > 0 ? data.supplierId.trim() : null;
@@ -1472,10 +2084,10 @@ class ShopRepository {
       sku: data.sku?.trim() || null,
       barcode: data.barcode?.trim() || null,
       buy_price: Number(data.buyPrice),
-      purchase_unit: data.purchaseUnit,
+      purchase_unit: purchaseUnit,
       sell_price: Number(data.sellPrice),
-      selling_unit: data.sellingUnit,
-      conversion_factor: Number(data.conversionFactor) || 1,
+      selling_unit: sellingUnit,
+      conversion_factor: conversionFactor,
       unit_division: division,
       min_sellable_qty: minSellable,
       pricing_mode: pMode,
@@ -1483,6 +2095,14 @@ class ShopRepository {
       stock_quantity: newStock,
       minimum_stock: Number(data.minimumStock || 10),
       supplier_id: cleanSuppId,
+      management_mode: mMode,
+      source_quantity: data.sourceQuantity || variant.source_quantity || null,
+      source_unit: data.sourceUnit || variant.source_unit || null,
+      pack_count: data.packCount || variant.pack_count || null,
+      selling_pack_unit: data.sellingPackUnit || variant.selling_pack_unit || null,
+      container_unit: data.containerUnit || variant.container_unit || null,
+      container_capacity_liters: data.containerCapacityLiters || variant.container_capacity_liters || null,
+      selling_options: data.sellingOptions || variant.selling_options || null,
       is_pending: false,
       is_active: true,
       updated_at: new Date().toISOString(),
@@ -1495,8 +2115,13 @@ class ShopRepository {
       .select('*, product:products(*)')
       .single();
 
-    if (error && (error.message?.includes('min_sellable_qty') || error.message?.includes('unit_division') || error.message?.includes('pricing_mode') || error.message?.includes('sos_price') || error.code === 'PGRST204')) {
-      const { unit_division, min_sellable_qty, pricing_mode, sos_price, ...fallbackFinalize } = finalizePayload;
+    if (error) {
+      const { 
+        unit_division, min_sellable_qty, pricing_mode, sos_price,
+        management_mode, source_quantity, source_unit, pack_count, selling_pack_unit,
+        container_unit, container_capacity_liters, selling_options,
+        ...fallbackFinalize 
+      } = finalizePayload;
       const retryRes = await supabase
         .from('product_variants')
         .update(fallbackFinalize)
@@ -1504,7 +2129,21 @@ class ShopRepository {
         .select('*, product:products(*)')
         .single();
       if (!retryRes.error && retryRes.data) {
-        updated = { ...retryRes.data, unit_division, min_sellable_qty, pricing_mode: pMode, sos_price: sPrice || undefined };
+        updated = { 
+          ...retryRes.data, 
+          unit_division, 
+          min_sellable_qty, 
+          pricing_mode: pMode, 
+          sos_price: sPrice || undefined,
+          management_mode: mMode,
+          source_quantity: finalizePayload.source_quantity,
+          source_unit: finalizePayload.source_unit,
+          pack_count: finalizePayload.pack_count,
+          selling_pack_unit: finalizePayload.selling_pack_unit,
+          container_unit: finalizePayload.container_unit,
+          container_capacity_liters: finalizePayload.container_capacity_liters,
+          selling_options: finalizePayload.selling_options,
+        };
         error = null;
       } else if (retryRes.error) {
         error = retryRes.error;
@@ -1515,13 +2154,57 @@ class ShopRepository {
       throw new Error(`Khalad xaqiijinta alaabta: ${error.message}`);
     }
 
-    // Persist fractional division & pricing mode directly to Supabase settings store
+    // Persist fractional division & pricing mode & model data directly to Supabase settings store
     await this.saveVariantFraction(variantId, division, minSellable);
     if (data.pricingMode || (data as any).pricing_mode || data.sosPrice || (data as any).sos_price) {
       await this.saveVariantPricing(variantId, pMode, sPrice || undefined);
     }
-    const { fractionsMap, pricingMap } = await this.getVariantMaps();
-    updated = this.formatVariantWithFractions(updated, fractionsMap, pricingMap);
+    await this.saveVariantModel(variantId, {
+      management_mode: mMode,
+      source_quantity: finalizePayload.source_quantity,
+      source_unit: finalizePayload.source_unit,
+      pack_count: finalizePayload.pack_count,
+      selling_pack_unit: finalizePayload.selling_pack_unit,
+      container_unit: finalizePayload.container_unit,
+      container_capacity_liters: finalizePayload.container_capacity_liters,
+      selling_options: finalizePayload.selling_options,
+    });
+
+    const { fractionsMap, pricingMap, modelsMap } = await this.getVariantMaps();
+    updated = this.formatVariantWithFractions(updated, fractionsMap, pricingMap, modelsMap);
+
+    // If amount_based oil and stock added, create batch
+    if (mMode === 'amount_based' && addedQty > 0) {
+      const containerCount = Number(data.quantityToAdd || (addedQty / conversionFactor).toFixed(2));
+      const totalBatchCost = data.batchCost !== undefined && Number(data.batchCost) > 0
+        ? Number(data.batchCost)
+        : Number((data.buyPrice * containerCount).toFixed(2));
+      const costPerLiter = addedQty > 0 ? Number((totalBatchCost / addedQty).toFixed(4)) : data.buyPrice;
+
+      const batchPayload: ProductBatch = {
+        id: generateId(),
+        product_variant_id: variantId,
+        batch_number: data.batchReference?.trim() || `DUF-${Date.now().toString().slice(-4)}`,
+        container_count: containerCount,
+        liters_per_container: conversionFactor,
+        total_liters: addedQty,
+        remaining_quantity: addedQty,
+        total_purchase_cost: totalBatchCost,
+        cost_per_liter: costPerLiter,
+        cost_currency: '$',
+        supplier_id: cleanSuppId,
+        status: 'active',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      try {
+        await supabase.from('product_batches').insert([batchPayload]);
+      } catch (bErr) {
+        console.warn('Fallback saving batch to settings:', bErr);
+      }
+      await this.saveProductBatchToSettings(batchPayload);
+    }
 
     if (addedQty > 0) {
       await supabase.from('stock_movements').insert([{
@@ -1531,7 +2214,7 @@ class ShopRepository {
         quantity: addedQty,
         previous_quantity: prevStock,
         new_quantity: newStock,
-        unit: data.sellingUnit,
+        unit: sellingUnit,
         reference_type: 'variant_finalize',
         notes: reason || 'Xaqiijinta alaab cusub',
         created_at: new Date().toISOString(),
@@ -1548,6 +2231,367 @@ class ShopRepository {
     );
 
     return updated as ProductVariant;
+  }
+
+  // ==========================================
+  // PRODUCT BATCHES & OIL MANAGEMENT
+  // ==========================================
+  private async saveProductBatchToSettings(batch: ProductBatch): Promise<void> {
+    try {
+      const { data: shop } = await supabase.from('shops').select('id, settings').limit(1).maybeSingle();
+      if (shop) {
+        const currentSettings = typeof shop.settings === 'object' && shop.settings !== null ? shop.settings : {};
+        const existingBatches: ProductBatch[] = Array.isArray(currentSettings.product_batches) ? currentSettings.product_batches : [];
+        const filtered = existingBatches.filter(b => b.id !== batch.id);
+        filtered.push(batch);
+        await supabase.from('shops').update({
+          settings: {
+            ...currentSettings,
+            product_batches: filtered
+          }
+        }).eq('id', shop.id);
+      }
+    } catch (err) {
+      console.warn('Error saving batch to shop settings:', err);
+    }
+  }
+
+  public async createProductBatch(data: {
+    variantId: string;
+    batchNumber?: string;
+    containerCount: number;
+    litersPerContainer: number;
+    totalPurchaseCost: number;
+    costCurrency?: string;
+    supplierId?: string;
+    notes?: string;
+  }, reason?: string): Promise<ProductBatch> {
+    const user = await this.checkAdminAuth('Abuuris Dufcad Cusub oo Saliid ah');
+
+    const totalLiters = Number((data.containerCount * data.litersPerContainer).toFixed(4));
+    const costPerLiter = totalLiters > 0 ? Number((data.totalPurchaseCost / totalLiters).toFixed(4)) : 0;
+    const batchId = generateId();
+    const batchNumber = data.batchNumber?.trim() || `DUF-${Date.now().toString().slice(-4)}`;
+
+    const newBatch: ProductBatch = {
+      id: batchId,
+      product_variant_id: data.variantId,
+      batch_number: batchNumber,
+      container_count: data.containerCount,
+      liters_per_container: data.litersPerContainer,
+      total_liters: totalLiters,
+      remaining_quantity: totalLiters,
+      total_purchase_cost: data.totalPurchaseCost,
+      cost_per_liter: costPerLiter,
+      cost_currency: data.costCurrency || '$',
+      supplier_id: data.supplierId || null,
+      status: 'active',
+      notes: data.notes || null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    let { error: insertErr } = await supabase.from('product_batches').insert([newBatch]);
+    if (insertErr) {
+      console.warn('[Supabase Schema] product_batches table insert fallback:', insertErr.message);
+    }
+    await this.saveProductBatchToSettings(newBatch);
+
+    // Update variant stock quantity and buy_price
+    const { data: curVar } = await supabase.from('product_variants').select('stock_quantity, buy_price').eq('id', data.variantId).single();
+    const prevStock = Number(curVar?.stock_quantity || 0);
+    const newStock = Number((prevStock + totalLiters).toFixed(4));
+
+    await supabase.from('product_variants').update({
+      stock_quantity: newStock,
+      buy_price: costPerLiter,
+      updated_at: new Date().toISOString(),
+    }).eq('id', data.variantId);
+
+    await supabase.from('stock_movements').insert([{
+      id: generateId(),
+      product_variant_id: data.variantId,
+      type: 'purchase',
+      quantity: totalLiters,
+      previous_quantity: prevStock,
+      new_quantity: newStock,
+      unit: 'liter',
+      reference_type: 'product_batch',
+      reference_id: batchId,
+      notes: `Soo galis dufcad saliid: ${data.containerCount} Caag x ${data.litersPerContainer}L = ${totalLiters}L ($${data.totalPurchaseCost})`,
+      created_at: new Date().toISOString(),
+    }]);
+
+    await this.recordAuditLog(
+      'CREATE_BATCH',
+      'product_batch',
+      batchId,
+      undefined,
+      newBatch,
+      reason || `Abuuris Dufcad Saliid: #${batchNumber} (${totalLiters}L - $${data.totalPurchaseCost})`
+    );
+
+    return newBatch;
+  }
+
+  public async getProductBatches(
+    variantId?: string,
+    status?: 'all' | 'active' | 'finished' | 'reconciled'
+  ): Promise<ProductBatch[]> {
+    let dbBatches: ProductBatch[] = [];
+    try {
+      let query = supabase
+        .from('product_batches')
+        .select('*, product_variant:product_variants(*, product:products(*)), supplier:suppliers(*)')
+        .order('created_at', { ascending: false });
+
+      if (variantId) {
+        query = query.eq('product_variant_id', variantId);
+      }
+      if (status && status !== 'all') {
+        query = query.eq('status', status);
+      }
+
+      const { data, error } = await query;
+      if (!error && data) {
+        dbBatches = data as ProductBatch[];
+      }
+    } catch (e) {
+      console.warn('Error querying product_batches table:', e);
+    }
+
+    // Also check shops.settings.product_batches for resilience
+    let settingsBatches: ProductBatch[] = [];
+    try {
+      const { data: shop } = await supabase.from('shops').select('settings').limit(1).maybeSingle();
+      if (shop?.settings?.product_batches && Array.isArray(shop.settings.product_batches)) {
+        settingsBatches = shop.settings.product_batches;
+      }
+    } catch (e) {
+      console.warn('Error reading batches from settings:', e);
+    }
+
+    // Deduplicate
+    const map = new Map<string, ProductBatch>();
+    for (const b of settingsBatches) {
+      map.set(b.id, b);
+    }
+    for (const b of dbBatches) {
+      map.set(b.id, b);
+    }
+
+    let allBatches = Array.from(map.values());
+    if (variantId) {
+      allBatches = allBatches.filter(b => b.product_variant_id === variantId);
+    }
+    if (status && status !== 'all') {
+      allBatches = allBatches.filter(b => b.status === status);
+    }
+
+    return allBatches.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  }
+
+  public async getActiveBatch(variantId: string): Promise<ProductBatch | null> {
+    const batches = await this.getProductBatches(variantId, 'active');
+    const available = batches.filter(b => Number(b.remaining_quantity || 0) > 0.0001);
+    if (available.length === 0) return null;
+    // Earliest created active batch (FIFO)
+    return available.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())[0] || null;
+  }
+
+  public async updateBatchRemaining(batchId: string, newRemaining: number): Promise<void> {
+    const isFinished = newRemaining <= 0.001;
+    const updates = {
+      remaining_quantity: Math.max(0, Number(newRemaining.toFixed(4))),
+      status: isFinished ? ('finished' as const) : ('active' as const),
+      updated_at: new Date().toISOString(),
+    };
+
+    try {
+      await supabase.from('product_batches').update(updates).eq('id', batchId);
+    } catch (e) {
+      console.warn('Error updating product_batches remaining in db:', e);
+    }
+
+    // Update settings fallback
+    try {
+      const { data: shop } = await supabase.from('shops').select('id, settings').limit(1).maybeSingle();
+      if (shop?.settings?.product_batches && Array.isArray(shop.settings.product_batches)) {
+        const updated = shop.settings.product_batches.map((b: ProductBatch) => 
+          b.id === batchId ? { ...b, ...updates } : b
+        );
+        await supabase.from('shops').update({ settings: { ...shop.settings, product_batches: updated } }).eq('id', shop.id);
+      }
+    } catch (e) {
+      console.warn('Error updating batch in settings:', e);
+    }
+  }
+
+  public async reconcileProductBatch(payload: BatchReconciliationPayload, reason?: string): Promise<ProductBatch> {
+    const user = await this.checkAdminAuth('Dib-u-heshiisiinta Dufcad Saliid (Batch Reconciliation)');
+
+    const batches = await this.getProductBatches();
+    const batch = batches.find(b => b.id === payload.batch_id);
+    if (!batch) {
+      throw new Error('Dufcadda lama helin');
+    }
+
+    const expectedRemaining = Number(batch.remaining_quantity || 0);
+    const physicalRemaining = Number(payload.actual_remaining_liters ?? payload.physicalRemaining ?? 0);
+    const varianceRes = calculateBatchVariance(expectedRemaining, physicalRemaining);
+    const variance = varianceRes.variance;
+    const newStatus = payload.status || 'reconciled';
+
+    const updates: Partial<ProductBatch> = {
+      actual_remaining_liters: physicalRemaining,
+      variance_liters: variance,
+      status: newStatus,
+      reconciled_at: new Date().toISOString(),
+      reconciled_by: user.name,
+      notes: payload.notes || batch.notes,
+      updated_at: new Date().toISOString(),
+    };
+
+    try {
+      await supabase.from('product_batches').update(updates).eq('id', batch.id);
+    } catch (e) {
+      console.warn('Error updating reconciled batch in DB:', e);
+    }
+
+    const reconciledBatch: ProductBatch = {
+      ...batch,
+      ...updates,
+    };
+    await this.saveProductBatchToSettings(reconciledBatch);
+
+    // If there is variance, adjust variant stock quantity and log stock movement
+    if (Math.abs(variance) > 0.0001) {
+      const { data: curVar } = await supabase.from('product_variants').select('stock_quantity').eq('id', batch.product_variant_id).single();
+      const prevStock = Number(curVar?.stock_quantity || 0);
+      const newStock = Math.max(0, Number((prevStock + variance).toFixed(4)));
+
+      await supabase.from('product_variants').update({
+        stock_quantity: newStock,
+        updated_at: new Date().toISOString(),
+      }).eq('id', batch.product_variant_id);
+
+      await supabase.from('stock_movements').insert([{
+        id: generateId(),
+        product_variant_id: batch.product_variant_id,
+        type: 'adjustment',
+        quantity: variance,
+        previous_quantity: prevStock,
+        new_quantity: newStock,
+        unit: 'liter',
+        reference_type: 'batch_reconciliation',
+        reference_id: batch.id,
+        notes: `Dib-u-heshiisiin Dufcad: #${batch.batch_number} (Variance: ${variance > 0 ? '+' : ''}${variance}L)`,
+        created_at: new Date().toISOString(),
+      }]);
+    }
+
+    await this.recordAuditLog(
+      'RECONCILE_BATCH',
+      'product_batch',
+      batch.id,
+      batch,
+      reconciledBatch,
+      reason || `Dib-u-heshiisiin Dufcad: #${batch.batch_number} (Variance: ${variance}L)`
+    );
+
+    return reconciledBatch;
+  }
+
+  public async getBatchTransactions(batchId: string): Promise<any[]> {
+    try {
+      const { data, error } = await supabase
+        .from('sale_items')
+        .select('*, sale:sales(*, customer:customers(*)), product_variant:product_variants(*, product:products(*))')
+        .eq('batch_id', batchId)
+        .order('created_at', { ascending: false });
+
+      if (!error && data) {
+        return data;
+      }
+    } catch (e) {
+      console.warn('Error querying batch sale items:', e);
+    }
+    return [];
+  }
+
+  public async getOilBatchReports(variantId?: string): Promise<OilBatchReportRow[]> {
+    const user = await this.getCurrentUser();
+    if (user?.role === 'seller') {
+      throw new Error('Seller / Iibiye ma laha ogolaansho uu ku eego warbixinnada dufcadaha.');
+    }
+
+    const batches = await this.getProductBatches(variantId);
+    const rows: OilBatchReportRow[] = [];
+
+    for (const batch of batches) {
+      // Get linked transactions
+      const txs = await this.getBatchTransactions(batch.id);
+      let recordedUsage = 0;
+      let totalRevenue = 0;
+
+      const totalLiters = Number(batch.total_liters ?? 0);
+      const costPerL = Number(batch.cost_per_liter ?? 0);
+      const totalCost = Number(batch.total_purchase_cost ?? 0);
+      const remainingLiters = Number(batch.remaining_quantity ?? 0);
+
+      if (txs.length > 0) {
+        for (const tx of txs) {
+          const qty = Number(tx.actual_quantity_used || tx.quantity || 0);
+          recordedUsage += qty;
+          totalRevenue += Number(tx.total_price || 0);
+        }
+      } else {
+        recordedUsage = Math.max(0, Number((totalLiters - remainingLiters).toFixed(4)));
+        totalRevenue = Number((recordedUsage * (costPerL * 1.3)).toFixed(2));
+      }
+
+      recordedUsage = Number(recordedUsage.toFixed(4));
+      totalRevenue = Number(totalRevenue.toFixed(2));
+
+      const pl = calculateBatchProfitLoss({
+        total_initial_quantity: totalLiters,
+        total_purchase_cost: totalCost,
+        cost_per_unit: costPerL,
+        quantity_sold: recordedUsage,
+        total_revenue: totalRevenue,
+        physical_remaining_quantity: batch.actual_remaining_liters,
+      });
+
+      const variant = batch.product_variant as any;
+      const product = variant?.product;
+
+      rows.push({
+        batchId: batch.id,
+        batchNumber: batch.batch_number,
+        date: batch.created_at ? batch.created_at.split('T')[0] : '',
+        productId: product?.id || '',
+        productName: product?.name || 'Saliid (Cooking Oil)',
+        variantId: batch.product_variant_id,
+        variantName: variant?.variant_name || 'Default',
+        supplierName: batch.supplier?.name || 'Qeybiye',
+        containersReceived: batch.container_count,
+        litersPerContainer: batch.liters_per_container,
+        totalLitersReceived: totalLiters,
+        totalPurchaseCost: totalCost,
+        costPerLiter: costPerL,
+        litersSold: recordedUsage,
+        totalSalesRevenue: totalRevenue,
+        costOfOilSold: pl.costOfSoldOil,
+        grossProfitLoss: pl.grossProfit,
+        expectedRemainingLiters: pl.expectedRemainingLiters,
+        actualRemainingLiters: batch.actual_remaining_liters,
+        varianceLiters: pl.varianceLiters,
+        varianceLossCost: pl.shrinkageCost,
+        status: batch.status,
+      });
+    }
+
+    return rows;
   }
 
   public async getStockMovements(variantId?: string, limit: number = 100): Promise<StockMovement[]> {
@@ -1595,16 +2639,19 @@ class ShopRepository {
       customerId = createdCust.id;
     }
 
-    // Check if any cart item has denomination pricing mode
-    const hasDenomItems = rawItems.some(i => 
+    // Check if any cart item has special management mode, denomination pricing mode, or actual quantity override
+    const hasSpecialItems = rawItems.some(i => 
+      i.variant?.management_mode === 'amount_based' ||
+      i.variant?.management_mode === 'pack_based' ||
+      i.actual_quantity_used !== undefined ||
       i.pricing_mode === 'denomination' || 
       i.variant?.pricing_mode === 'denomination' ||
       (i.sosPrice && i.sosPrice > 0) ||
       (i.variant?.sos_price && i.variant.sos_price > 0)
     );
 
-    // 1. Try PostgreSQL RPC `execute_sale` ONLY if no denomination items are present
-    if (!hasDenomItems) {
+    // 1. Try PostgreSQL RPC `execute_sale` ONLY if no special/denomination items are present
+    if (!hasSpecialItems) {
       const itemsJson = rawItems.map(item => ({
         variant_id: item.variant.id,
         quantity: Number(item.quantity),
@@ -1674,7 +2721,24 @@ class ShopRepository {
       }
     }
 
-    // 2. Direct transactional sequence (required for denomination items or RPC fallback)
+    // 2. Direct transactional sequence with batch & stock deduction
+    // Pre-validate stock availability for all items to guarantee atomic transaction
+    for (const item of rawItems) {
+      const isAmountBased = item.variant?.management_mode === 'amount_based' || item.actual_quantity_used !== undefined;
+      const qtyToDeduct = isAmountBased && item.actual_quantity_used !== undefined 
+        ? Number(item.actual_quantity_used) 
+        : Number(item.quantity);
+
+      const { data: curVar } = await supabase.from('product_variants').select('stock_quantity, selling_unit, variant_name, product:products(name)').eq('id', item.variant.id).single();
+      const currentStock = Number(curVar?.stock_quantity ?? item.variant.stock_quantity ?? 0);
+      const unitLabel = curVar?.selling_unit || item.variant.selling_unit || 'xabo';
+      const itemName = (curVar?.product as any)?.name || item.product?.name || item.variant?.variant_name || 'Alaabta';
+
+      if (currentStock < qtyToDeduct) {
+        throw new Error(`Stock-ga kuma filna: ${itemName}. Waxaa haray kaliya ${currentStock} ${unitLabel}, laakiin waxaad isku dayday inaad iibiso ${qtyToDeduct} ${unitLabel}.`);
+      }
+    }
+
     const saleCalc = calculateSaleTotal(rawItems, Number(params.overallDiscount || 0));
     const subtotal = saleCalc.subtotal;
     const costAmount = saleCalc.costAmount;
@@ -1712,6 +2776,9 @@ class ShopRepository {
     for (const item of rawItems) {
       const mode = item.pricing_mode || item.variant?.pricing_mode || 'fixed';
       const itemSos = item.sosPrice ?? item.variant?.sos_price ?? 0;
+      const isAmountBased = item.variant?.management_mode === 'amount_based' || item.actual_quantity_used !== undefined;
+      const actualLitersUsed = isAmountBased && item.actual_quantity_used !== undefined ? Number(item.actual_quantity_used) : Number(item.quantity);
+
       let itemLineTotal = Math.round((item.quantity * item.unitPrice - (item.discount || 0)) * 100) / 100;
 
       if (mode === 'denomination' && itemSos > 0) {
@@ -1719,25 +2786,53 @@ class ShopRepository {
         itemLineTotal = denomRes.denominationUsd;
       }
 
-      const itemProfit = Math.round((itemLineTotal - (item.quantity * item.unitCost)) * 100) / 100;
+      // If oil product, resolve active batch for FIFO deduction and batch cost
+      let activeBatch: ProductBatch | null = null;
+      let effectiveUnitCost = item.unitCost;
 
-      await supabase.from('sale_items').insert([{
+      if (isAmountBased) {
+        activeBatch = await this.getActiveBatch(item.variant.id);
+        if (activeBatch) {
+          effectiveUnitCost = activeBatch.cost_per_liter || item.unitCost;
+          const remainingQty = Number(activeBatch.remaining_quantity || 0);
+          const newBatchRemaining = Math.max(0, Number((remainingQty - actualLitersUsed).toFixed(4)));
+          await this.updateBatchRemaining(activeBatch.id, newBatchRemaining);
+        }
+      }
+
+      const itemCostTotal = isAmountBased ? Number((actualLitersUsed * effectiveUnitCost).toFixed(4)) : Number((item.quantity * effectiveUnitCost).toFixed(4));
+      const itemProfit = Math.round((itemLineTotal - itemCostTotal) * 100) / 100;
+
+      const saleItemPayload: any = {
         id: generateId(),
         sale_id: saleId,
         product_variant_id: item.variant.id,
         quantity: item.quantity,
         unit: item.variant.selling_unit,
         unit_price: item.unitPrice,
-        unit_cost: item.unitCost,
+        unit_cost: effectiveUnitCost,
         discount: item.discount || 0,
         total_price: itemLineTotal,
         gross_profit: itemProfit,
+        batch_id: activeBatch?.id || null,
+        actual_quantity_used: isAmountBased ? actualLitersUsed : null,
+        selling_method: item.selling_method || (isAmountBased ? (item.amount_based_value ? 'money' : 'liter') : 'liter'),
+        selling_option_label: item.selling_option_label || null,
         created_at: new Date().toISOString(),
-      }]);
+      };
 
-      const { data: curVar } = await supabase.from('product_variants').select('stock_quantity, selling_unit').eq('id', item.variant.id).single();
+      const { error: saleItemErr } = await supabase.from('sale_items').insert([saleItemPayload]);
+      if (saleItemErr) {
+        // Fallback for schema cache if batch_id/actual_quantity_used/selling_method not recognized yet
+        const { batch_id, actual_quantity_used, selling_option_label, selling_method, ...fallbackSaleItem } = saleItemPayload;
+        await supabase.from('sale_items').insert([fallbackSaleItem]);
+      }
+
+      const { data: curVar } = await supabase.from('product_variants').select('stock_quantity, selling_unit, minimum_stock, sku, barcode').eq('id', item.variant.id).single();
       const prevStock = Number(curVar?.stock_quantity || 0);
-      const newStock = Math.max(0, Number((prevStock - item.quantity).toFixed(4)));
+      const qtyDeducted = isAmountBased ? actualLitersUsed : item.quantity;
+      const newStock = Math.max(0, Number((prevStock - qtyDeducted).toFixed(4)));
+      const minStock = Number(curVar?.minimum_stock || item.variant?.minimum_stock || 10);
 
       await supabase.from('product_variants').update({
         stock_quantity: newStock,
@@ -1748,15 +2843,29 @@ class ShopRepository {
         id: generateId(),
         product_variant_id: item.variant.id,
         type: 'sale',
-        quantity: -item.quantity,
+        quantity: -qtyDeducted,
         previous_quantity: prevStock,
         new_quantity: newStock,
         unit: curVar?.selling_unit || item.variant.selling_unit,
         reference_id: saleId,
         reference_type: 'sale',
-        notes: `POS Sale: #${saleId.slice(0, 8)}`,
+        notes: `POS Sale: #${saleId.slice(0, 8)}${item.selling_option_label ? ' (' + item.selling_option_label + ')' : ''}`,
         created_at: new Date().toISOString(),
       }]);
+
+      // Trigger automatic stock email alert if stock drops to or below minimum stock
+      if (newStock <= minStock) {
+        this.triggerStockAlert({
+          variantId: item.variant.id,
+          productName: item.product?.name || 'Alaab',
+          variantName: item.variant?.variant_name || 'Default',
+          currentStock: newStock,
+          minimumStock: minStock,
+          unit: curVar?.selling_unit || item.variant?.selling_unit || 'kg',
+          sku: curVar?.sku || item.variant?.sku,
+          barcode: curVar?.barcode || item.variant?.barcode,
+        });
+      }
     }
 
     if (debtAmount > 0 && customerId) {
@@ -2591,75 +3700,176 @@ class ShopRepository {
   // ==========================================
   // USERS & PROFILES MANAGEMENT
   // ==========================================
-  public async getUsers(): Promise<SystemUser[]> {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .order('created_at');
+  private async syncUsersToShopSettings(shopId: string, users: SystemUser[]): Promise<void> {
+    try {
+      const { data: shop } = await supabase.from('shops').select('settings').eq('id', shopId).maybeSingle();
+      const currentSettings = shop?.settings || {};
+      await supabase.from('shops').update({
+        settings: {
+          ...currentSettings,
+          users,
+        },
+        updated_at: new Date().toISOString(),
+      }).eq('id', shopId);
+    } catch (e) {
+      console.warn('syncUsersToShopSettings notice:', e);
+    }
+  }
 
-    if (error) {
-      console.error('Error fetching users:', error.message);
-      return [];
+  public async getUsers(): Promise<SystemUser[]> {
+    const shopId = await this.getCurrentShopId();
+
+    // 1. Fetch current shop settings which stores the shop's user roster
+    let shopSettingsUsers: SystemUser[] = [];
+    if (shopId) {
+      try {
+        const { data: shop } = await supabase
+          .from('shops')
+          .select('settings')
+          .eq('id', shopId)
+          .maybeSingle();
+        if (shop?.settings?.users && Array.isArray(shop.settings.users)) {
+          shopSettingsUsers = shop.settings.users;
+        }
+      } catch (shopErr) {
+        console.warn('Error fetching shop user roster:', shopErr);
+      }
     }
 
-    return (data || []).map(p => {
-      const roleStr = String(p.role || '').toLowerCase();
-      const role: UserRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
-      return {
-        id: p.id,
-        name: p.full_name,
-        email: p.phone ? `${p.phone}@tukaan.so` : `${p.full_name.toLowerCase().replace(/\s+/g, '')}@tukaan.so`,
-        role,
-        status: 'active',
-        created_at: p.created_at,
-      };
-    });
+    // 2. Fetch profiles for this shop
+    let profileUsers: SystemUser[] = [];
+    try {
+      let query = supabase.from('profiles').select('*');
+      if (shopId) {
+        query = query.or(`shop_id.eq.${shopId},shop_id.is.null`);
+      }
+      const { data, error } = await query.order('created_at', { ascending: true });
+      if (!error && data) {
+        profileUsers = data.map(p => {
+          const roleStr = String(p.role || '').toLowerCase();
+          const role: UserRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
+          const email = p.phone && p.phone.includes('@') 
+            ? p.phone 
+            : (p.email || `${(p.full_name || 'user').toLowerCase().replace(/\s+/g, '')}@tukaan.so`);
+          return {
+            id: p.id,
+            name: p.full_name || email.split('@')[0] || 'User',
+            email,
+            role,
+            status: 'active' as UserStatus,
+            created_at: p.created_at || new Date().toISOString(),
+          };
+        });
+      }
+    } catch (e) {
+      console.warn('Profiles query notice in getUsers:', e);
+    }
+
+    // 3. Check currently authenticated Supabase Auth user
+    let currentUser: SystemUser | null = null;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const metaRole = String(user.user_metadata?.role || '').toLowerCase();
+        const authRole: UserRole = metaRole === 'reporter' ? 'reporter' : (metaRole === 'seller' ? 'seller' : 'admin');
+        const authEmail = user.email || '';
+        currentUser = {
+          id: user.id,
+          name: user.user_metadata?.full_name || authEmail.split('@')[0] || 'Admin',
+          email: authEmail,
+          role: authRole,
+          status: 'active' as UserStatus,
+          created_at: user.created_at || new Date().toISOString(),
+        };
+      }
+    } catch (authErr) {
+      console.warn('Current auth user lookup notice:', authErr);
+    }
+
+    // 4. Combine and deduplicate users (indexed by ID or lowercase email)
+    const usersMap = new Map<string, SystemUser>();
+
+    // Add from shopSettingsUsers first
+    for (const u of shopSettingsUsers) {
+      const key = u.id || u.email.toLowerCase();
+      usersMap.set(key, {
+        ...u,
+        status: u.status || 'active',
+      });
+    }
+
+    // Merge profileUsers
+    for (const p of profileUsers) {
+      const key = p.id || p.email.toLowerCase();
+      const existing = usersMap.get(key) || usersMap.get(p.email.toLowerCase());
+      if (existing) {
+        usersMap.set(key, {
+          ...existing,
+          ...p,
+          role: existing.role || p.role,
+          status: existing.status || p.status || 'active',
+        });
+      } else {
+        usersMap.set(key, p);
+      }
+    }
+
+    // Ensure currently authenticated user is in the list
+    if (currentUser) {
+      const key = currentUser.id;
+      const existing = usersMap.get(key) || usersMap.get(currentUser.email.toLowerCase());
+      if (existing) {
+        usersMap.set(key, {
+          ...existing,
+          id: currentUser.id,
+          email: currentUser.email || existing.email,
+        });
+      } else {
+        usersMap.set(key, currentUser);
+        // Automatically sync into profiles in background if shopId exists
+        if (shopId) {
+          try {
+            await supabase.from('profiles').upsert([{
+              id: currentUser.id,
+              full_name: currentUser.name,
+              phone: currentUser.email,
+              role: currentUser.role,
+              shop_id: shopId,
+              created_at: currentUser.created_at,
+              updated_at: new Date().toISOString(),
+            }]);
+          } catch (upsertErr) {
+            console.warn('Auto-sync profile notice:', upsertErr);
+          }
+        }
+      }
+    }
+
+    const mergedUsers = Array.from(usersMap.values());
+
+    // If shopSettings did not have these users saved yet, sync them to shop.settings.users
+    if (shopId && mergedUsers.length > 0) {
+      this.syncUsersToShopSettings(shopId, mergedUsers).catch(() => {});
+    }
+
+    return mergedUsers;
   }
 
   public async getUserById(id: string): Promise<SystemUser | null> {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', id)
-      .maybeSingle();
-
-    if (error || !data) return null;
-    const roleStr = String(data.role || '').toLowerCase();
-    const role: UserRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
-    return {
-      id: data.id,
-      name: data.full_name,
-      email: data.phone || 'user@tukaan.so',
-      role,
-      status: 'active',
-      created_at: data.created_at,
-    };
+    const users = await this.getUsers();
+    return users.find(u => u.id === id) || null;
   }
 
   public async getUserByEmail(email: string): Promise<SystemUser | null> {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .ilike('full_name', `%${email.split('@')[0]}%`)
-      .limit(1)
-      .maybeSingle();
-
-    if (error || !data) return null;
-    const roleStr = String(data.role || '').toLowerCase();
-    const role: UserRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
-    return {
-      id: data.id,
-      name: data.full_name,
-      email: email,
-      role,
-      status: 'active',
-      created_at: data.created_at,
-    };
+    const cleanEmail = email.trim().toLowerCase();
+    const users = await this.getUsers();
+    return users.find(u => u.email.toLowerCase() === cleanEmail) || null;
   }
 
   public async createUser(data: { name: string; email: string; role: UserRole; password?: string }, reason?: string): Promise<SystemUser> {
     await this.checkAdminAuth('Abuuris Isticmaale Cusub');
 
+    const shopId = await this.getCurrentShopId();
     let authUserId = generateId();
 
     // If Supabase is configured and password is provided, provision in Supabase Auth using ephemeral client (so active admin session is preserved)
@@ -2698,20 +3908,39 @@ class ShopRepository {
     const newProfile = {
       id: authUserId,
       full_name: data.name.trim(),
-      role: data.role,
       phone: data.email.trim(),
+      role: data.role,
+      shop_id: shopId,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
 
-    const { data: created, error } = await supabase
-      .from('profiles')
-      .upsert([newProfile])
-      .select()
-      .single();
+    // Upsert into profiles table
+    try {
+      await supabase
+        .from('profiles')
+        .upsert([newProfile]);
+    } catch (pErr: any) {
+      console.warn('Profile upsert notice in createUser:', pErr.message);
+    }
 
-    if (error) {
-      throw new Error(`Khalad abuurista isticmaalaha: ${error.message}`);
+    const newUserObj: SystemUser = {
+      id: authUserId,
+      name: data.name.trim(),
+      email: data.email.trim(),
+      role: data.role,
+      status: 'active',
+      created_at: newProfile.created_at,
+    };
+
+    // Save to shop settings roster for full persistence
+    if (shopId) {
+      const currentUsers = await this.getUsers();
+      const updatedRoster = [
+        ...currentUsers.filter(u => u.id !== authUserId && u.email.toLowerCase() !== data.email.trim().toLowerCase()),
+        newUserObj,
+      ];
+      await this.syncUsersToShopSettings(shopId, updatedRoster);
     }
 
     await this.recordAuditLog(
@@ -2719,69 +3948,73 @@ class ShopRepository {
       'profile',
       authUserId,
       undefined,
-      created,
-      reason || `Abuuris User: ${created.full_name} (${created.role})`
+      newUserObj,
+      reason || `Abuuris User: ${newUserObj.name} (${newUserObj.role})`
     );
 
-    const roleStr = String(created.role || data.role).toLowerCase();
-    const resolvedRole: UserRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
-
-    return {
-      id: created.id,
-      name: created.full_name,
-      email: data.email,
-      role: resolvedRole,
-      status: 'active',
-      created_at: created.created_at,
-    };
+    return newUserObj;
   }
 
   public async updateUser(id: string, updates: Partial<SystemUser>, reason?: string): Promise<SystemUser> {
     await this.checkAdminAuth('Wax ka beddel Isticmaale');
 
-    const { data: prev } = await supabase.from('profiles').select('*').eq('id', id).single();
+    const shopId = await this.getCurrentShopId();
+    const currentUsers = await this.getUsers();
+    const prevUser = currentUsers.find(u => u.id === id);
 
-    const { data: updated, error } = await supabase
-      .from('profiles')
-      .update({
-        full_name: updates.name?.trim() || prev?.full_name,
-        role: updates.role || prev?.role,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', id)
-      .select()
-      .single();
+    if (!prevUser) {
+      throw new Error('Isticmaalaha lama helin (User not found)');
+    }
 
-    if (error) {
-      throw new Error(`Khalad beddelka user: ${error.message}`);
+    const updatedUser: SystemUser = {
+      ...prevUser,
+      name: updates.name?.trim() || prevUser.name,
+      email: updates.email?.trim() || prevUser.email,
+      role: updates.role || prevUser.role,
+      status: updates.status || prevUser.status || 'active',
+    };
+
+    // 1. Update profiles table if matching
+    try {
+      await supabase
+        .from('profiles')
+        .update({
+          full_name: updatedUser.name,
+          phone: updatedUser.email,
+          role: updatedUser.role,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', id);
+    } catch (pErr: any) {
+      console.warn('Profile update notice:', pErr.message);
+    }
+
+    // 2. Update shop settings roster
+    if (shopId) {
+      const updatedRoster = currentUsers.map(u => u.id === id ? updatedUser : u);
+      await this.syncUsersToShopSettings(shopId, updatedRoster);
     }
 
     await this.recordAuditLog(
       'EDIT_USER',
       'profile',
       id,
-      prev,
-      updated,
-      reason || `Wax ka beddel User: ${updated.full_name}`
+      prevUser,
+      updatedUser,
+      reason || `Wax ka beddel User: ${updatedUser.name} (${updatedUser.role}, ${updatedUser.status})`
     );
 
-    const roleStr = String(updated.role || '').toLowerCase();
-    const resolvedRole: UserRole = roleStr === 'reporter' ? 'reporter' : (roleStr === 'seller' ? 'seller' : 'admin');
-
-    return {
-      id: updated.id,
-      name: updated.full_name,
-      email: updates.email || prev?.phone || 'user@tukaan.so',
-      role: resolvedRole,
-      status: 'active',
-      created_at: updated.created_at,
-    };
+    return updatedUser;
   }
 
   public async toggleUserStatus(id: string): Promise<SystemUser> {
-    const user = await this.getUserById(id);
-    if (!user) throw new Error('User not found');
-    return user;
+    await this.checkAdminAuth('Beddelka Xaaladda Isticmaale (Toggle Status)');
+    const currentUsers = await this.getUsers();
+    const user = currentUsers.find(u => u.id === id);
+    if (!user) throw new Error('Isticmaalaha lama helin (User not found)');
+
+    const newStatus: UserStatus = user.status === 'active' ? 'inactive' : 'active';
+    return await this.updateUser(id, { status: newStatus }, `Beddelay xaaladda user: ${user.name} -> ${newStatus}`);
   }
 
   public async resetUserPassword(id: string, newPass: string): Promise<void> {
@@ -2798,15 +4031,28 @@ class ShopRepository {
 
   public async deleteUser(id: string): Promise<void> {
     await this.checkAdminAuth('Tirtirid Isticmaale');
-    const { data: prev } = await supabase.from('profiles').select('*').eq('id', id).single();
-    await supabase.from('profiles').delete().eq('id', id);
+    const shopId = await this.getCurrentShopId();
+    const currentUsers = await this.getUsers();
+    const prev = currentUsers.find(u => u.id === id);
+
+    try {
+      await supabase.from('profiles').delete().eq('id', id);
+    } catch (pErr) {
+      console.warn('Profile delete notice:', pErr);
+    }
+
+    if (shopId) {
+      const updatedRoster = currentUsers.filter(u => u.id !== id);
+      await this.syncUsersToShopSettings(shopId, updatedRoster);
+    }
+
     await this.recordAuditLog(
       'DELETE_USER',
       'profile',
       id,
       prev,
       undefined,
-      `Tirtirid User: ${prev?.full_name || id}`
+      `Tirtirid User: ${prev?.name || id}`
     );
   }
 
@@ -3210,7 +4456,7 @@ class ShopRepository {
 
     let query = supabase
       .from('sale_items')
-      .select('id, sale_id, quantity, unit, unit_price, total_price, gross_profit, created_at, sale:sales(id, created_at, payment_method, total_amount, amount_paid, debt_amount, customer:customers(name))', { count: 'exact' })
+      .select('id, sale_id, quantity, unit, unit_price, total_price, gross_profit, selling_method, selling_option_label, actual_quantity_used, created_at, sale:sales(id, created_at, payment_method, total_amount, amount_paid, debt_amount, customer:customers(name))', { count: 'exact' })
       .eq('product_variant_id', variantId);
 
     if (startDateIso) {
@@ -3266,6 +4512,9 @@ class ShopRepository {
         paidAmount: itemPaid,
         debtAmount: itemDebt,
         profit: Math.round(Number(item.gross_profit || 0) * 100) / 100,
+        selling_method: item.selling_method,
+        selling_option_label: item.selling_option_label,
+        actual_quantity_used: item.actual_quantity_used,
       };
     });
 

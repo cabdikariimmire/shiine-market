@@ -20,7 +20,9 @@ import {
   FileText,
   Edit,
   History,
-  RotateCcw
+  RotateCcw,
+  Mail,
+  Loader2
 } from 'lucide-react';
 import { AppShell } from '@/components/layout/app-shell';
 import { Button } from '@/components/ui/button';
@@ -36,6 +38,7 @@ import { Debt, Customer, DebtPayment } from '@/types';
 
 export default function DebtsPage() {
   const { success, error } = useToast();
+  const [sendingReminderId, setSendingReminderId] = useState<string | null>(null);
 
   // Active Tab: 'debts' (Daymaha) vs 'calendar' (Calendar) vs 'payments' (Bixinnada)
   const [activeTab, setActiveTab] = useState<'debts' | 'calendar' | 'payments'>('debts');
@@ -273,6 +276,25 @@ export default function DebtsPage() {
     }
   };
 
+  // Send Single Debt Reminder via Resend Email
+  const handleSendDebtReminder = async (debt: Debt) => {
+    try {
+      setSendingReminderId(debt.id);
+      const res = await repository.triggerDebtReminderAlert(debt);
+      if (res.skipped) {
+        success('Digniinta waa la diray horay', res.reason || 'Email-ka dayntan waxaa la diray 24-kii saac ee la soo dhaafay.');
+      } else if (res.success) {
+        success('Xasuusinta daynta waa la diray!', `Email xasuusin ah ayaa loo diray: ${debt.customer?.name || 'Macmiil'}`);
+      } else {
+        error('Diritaanka xasuusinta wuu fashilmay', res.error || 'Fadlan hubi email settings.');
+      }
+    } catch (err: any) {
+      error('Khalad', err.message || 'Lama diri karin xasuusinta');
+    } finally {
+      setSendingReminderId(null);
+    }
+  };
+
   const filteredDebts = debts.filter(d => {
     const q = search.toLowerCase();
     const cName = (d.customer?.name || '').toLowerCase();
@@ -507,6 +529,22 @@ export default function DebtsPage() {
                                   className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold h-7 px-2.5 text-xs shadow-xs"
                                 >
                                   Bixi Dayn
+                                </Button>
+                              )}
+                              {d.remaining_balance > 0 && (
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  disabled={sendingReminderId === d.id}
+                                  onClick={() => handleSendDebtReminder(d)}
+                                  className="h-7 px-2 text-xs font-bold text-slate-600 hover:text-emerald-600 gap-1"
+                                  title="Dir Email Xasuusin Dayn ah"
+                                >
+                                  {sendingReminderId === d.id ? (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-600" />
+                                  ) : (
+                                    <Mail className="h-3.5 w-3.5 text-slate-500 hover:text-emerald-600" />
+                                  )}
                                 </Button>
                               )}
                               <Button

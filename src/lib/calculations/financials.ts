@@ -10,7 +10,7 @@ export function roundToCents(amount: number): number {
 
 /**
  * Calculates item subtotal, total price, and gross profit for a single cart line item.
- * Supports per-item discount, decimal quantities (e.g. 1.25 kg), and denomination mode.
+ * Supports per-item discount, decimal quantities (e.g. 1.25 kg, 1.25 L), amount-based oil options, and denomination mode.
  */
 export function calculateCartItemLine(
   unitPrice: number,
@@ -18,7 +18,13 @@ export function calculateCartItemLine(
   quantity: number,
   itemDiscount: number = 0,
   pricingMode: 'fixed' | 'denomination' = 'fixed',
-  sosPrice: number = 0
+  sosPrice: number | null | undefined = 0,
+  options?: {
+    managementMode?: 'standard' | 'pack_based' | 'amount_based';
+    actualQuantityUsed?: number;
+    amountBasedCurrency?: 'SOS' | 'USD';
+    amountBasedValue?: number;
+  }
 ): { 
   totalPrice: number; 
   grossProfit: number; 
@@ -30,9 +36,45 @@ export function calculateCartItemLine(
   const safeQty = Math.max(0, quantity);
   const safeUnitPrice = Math.max(0, unitPrice);
   const safeCost = Math.max(0, unitCost);
+  const safeSosPrice = Number(sosPrice) || 0;
 
-  if (pricingMode === 'denomination' && sosPrice > 0) {
-    const sosTotal = Math.round(sosPrice * safeQty);
+  // 1. Amount-based (e.g. Cooking Oil with money options)
+  if (options?.managementMode === 'amount_based' && options.amountBasedValue && options.amountBasedValue > 0) {
+    const qtyUsed = options.actualQuantityUsed !== undefined && options.actualQuantityUsed > 0 
+      ? options.actualQuantityUsed 
+      : safeQty;
+    const totalCost = roundToCents(safeCost * qtyUsed);
+
+    if (options.amountBasedCurrency === 'SOS') {
+      const sosVal = Math.round(options.amountBasedValue);
+      const denom = calculateSosDenomination(sosVal);
+      const rawLineTotal = denom.denominationUsd;
+      const safeDiscount = Math.max(0, Math.min(itemDiscount, rawLineTotal));
+      const totalPrice = roundToCents(rawLineTotal - safeDiscount);
+      const grossProfit = roundToCents(totalPrice - totalCost);
+
+      return {
+        totalPrice,
+        grossProfit,
+        totalCost,
+        sosTotal: sosVal,
+        denominationUsd: denom.denominationUsd,
+        differenceSos: denom.differenceSos,
+      };
+    } else {
+      // Exact USD option (e.g. Rubac weyn $0.50 or $0.45)
+      const rawLineTotal = roundToCents(options.amountBasedValue);
+      const safeDiscount = Math.max(0, Math.min(itemDiscount, rawLineTotal));
+      const totalPrice = roundToCents(rawLineTotal - safeDiscount);
+      const grossProfit = roundToCents(totalPrice - totalCost);
+
+      return { totalPrice, grossProfit, totalCost };
+    }
+  }
+
+  // 2. Denomination SOS mode (Mode A)
+  if (pricingMode === 'denomination' && safeSosPrice > 0) {
+    const sosTotal = Math.round(safeSosPrice * safeQty);
     const denom = calculateSosDenomination(sosTotal);
     const rawLineTotal = denom.denominationUsd;
     const safeDiscount = Math.max(0, Math.min(itemDiscount, rawLineTotal));
@@ -50,6 +92,7 @@ export function calculateCartItemLine(
     };
   }
 
+  // 3. Standard Fixed USD mode (Mode B)
   const rawLineTotal = roundToCents(safeUnitPrice * safeQty);
   const safeDiscount = Math.max(0, Math.min(itemDiscount, rawLineTotal));
 
@@ -94,6 +137,33 @@ export function calculateSaleTotal(
     const price = 'unitPrice' in item ? item.unitPrice : item.unit_price;
     const cost = 'unitCost' in item ? item.unitCost : item.unit_cost;
     const disc = item.discount || 0;
+    const actualQty = ('actual_quantity_used' in item && item.actual_quantity_used !== undefined && item.actual_quantity_used > 0)
+      ? item.actual_quantity_used
+      : (('actualQuantityUsed' in item && (item as any).actualQuantityUsed > 0) ? (item as any).actualQuantityUsed : qty);
+
+    const isAmountBased = ('management_mode' in item && item.management_mode === 'amount_based')
+      || ('variant' in item && item.variant?.management_mode === 'amount_based')
+      || ('product_variant' in item && item.product_variant?.management_mode === 'amount_based')
+      || (('amount_based_value' in item && (item.amount_based_value || 0) > 0) || ('amountBasedValue' in item && ((item as any).amountBasedValue || 0) > 0));
+
+    const amountCurrency = ('amount_based_currency' in item ? item.amount_based_currency : undefined)
+      ?? ('amountBasedCurrency' in item ? (item as any).amountBasedCurrency : undefined);
+    
+    const amountVal = ('amount_based_value' in item ? item.amount_based_value : undefined)
+      ?? ('amountBasedValue' in item ? (item as any).amountBasedValue : undefined);
+
+    if (isAmountBased && amountVal && amountVal > 0) {
+      if (amountCurrency === 'SOS') {
+        totalSos += Math.round(amountVal);
+        costAmount += roundToCents(cost * actualQty);
+        itemDiscounts += disc;
+      } else {
+        fixedSubtotal += roundToCents(amountVal);
+        costAmount += roundToCents(cost * actualQty);
+        itemDiscounts += disc;
+      }
+      continue;
+    }
 
     // Determine pricing mode
     const mode = item.pricing_mode 
@@ -150,6 +220,60 @@ export function calculateSaleTotal(
     denominationUsd,
     differenceSos,
     fixedSubtotal: roundToCents(fixedSubtotal),
+  };
+}
+
+/**
+ * Calculates batch profit & loss, usage, and physical reconciliation variance.
+ */
+export function calculateBatchProfitLoss(
+  batch: {
+    total_initial_quantity: number;
+    total_purchase_cost: number;
+    cost_per_unit: number;
+    quantity_sold: number;
+    total_revenue: number;
+    physical_remaining_quantity?: number;
+  }
+): {
+  litersReceived: number;
+  totalPurchaseCost: number;
+  costPerLiter: number;
+  litersSold: number;
+  salesRevenue: number;
+  costOfSoldOil: number;
+  grossProfit: number;
+  expectedRemainingLiters: number;
+  actualRemainingLiters: number;
+  varianceLiters: number;
+  shrinkageCost: number;
+} {
+  const litersReceived = Math.round(Number(batch.total_initial_quantity || 0) * 10000) / 10000;
+  const totalPurchaseCost = roundToCents(Number(batch.total_purchase_cost || 0));
+  const costPerLiter = Math.round(Number(batch.cost_per_unit || 0) * 10000) / 10000;
+  const litersSold = Math.round(Number(batch.quantity_sold || 0) * 10000) / 10000;
+  const salesRevenue = roundToCents(Number(batch.total_revenue || 0));
+  const costOfSoldOil = roundToCents(litersSold * costPerLiter);
+  const grossProfit = roundToCents(salesRevenue - costOfSoldOil);
+  const expectedRemainingLiters = Math.max(0, Math.round((litersReceived - litersSold) * 10000) / 10000);
+  const actualRemainingLiters = batch.physical_remaining_quantity !== undefined 
+    ? Math.round(Number(batch.physical_remaining_quantity) * 10000) / 10000 
+    : expectedRemainingLiters;
+  const varianceLiters = Math.round((actualRemainingLiters - expectedRemainingLiters) * 10000) / 10000;
+  const shrinkageCost = varianceLiters < 0 ? roundToCents(Math.abs(varianceLiters) * costPerLiter) : 0;
+
+  return {
+    litersReceived,
+    totalPurchaseCost,
+    costPerLiter,
+    litersSold,
+    salesRevenue,
+    costOfSoldOil,
+    grossProfit,
+    expectedRemainingLiters,
+    actualRemainingLiters,
+    varianceLiters,
+    shrinkageCost,
   };
 }
 

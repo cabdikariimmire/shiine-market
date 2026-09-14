@@ -8,9 +8,9 @@ export const productSchema = z.object({
   supplier_id: z.string().optional().nullable(),
   buy_price: z.number().min(0, 'Qiimaha iibsashada ma noqon karo mid taban'),
   sell_price: z.number().min(0, 'Qiimaha iibinta ma noqon karo mid taban'),
-  quantity: z.number().int().default(0),
-  minimum_stock: z.number().int().min(0).default(5),
-  unit: z.enum(['piece', 'kg', 'bag', 'box', 'bottle', 'carton', 'packet', 'xabo', 'kartoon', 'kiish', 'liter', 'dhalo']).default('xabo'),
+  quantity: z.number().default(0),
+  minimum_stock: z.number().min(0).default(5),
+  unit: z.enum(['piece', 'pcs', 'kg', 'gram', 'g', 'liter', 'l', 'ml', 'bag', 'bac', 'caag', 'box', 'bottle', 'carton', 'packet', 'xabo', 'kartoon', 'kiish', 'dhalo']).default('xabo'),
   image_url: z.string().optional().default(''),
   description: z.string().optional().default(''),
   is_active: z.boolean().default(true),
@@ -51,7 +51,7 @@ export const expenseSchema = z.object({
 
 export const purchaseItemSchema = z.object({
   product_id: z.string().min(1, 'Dooro alaabta'),
-  quantity: z.number().int().positive('Tirada waa inay ka waynaataa 0'),
+  quantity: z.number().positive('Tirada waa inay ka waynaataa 0'),
   buy_price: z.number().min(0, 'Qiimaha ma noqon karo taban'),
   total_cost: z.number().min(0),
 });
@@ -64,7 +64,7 @@ export const purchaseSchema = z.object({
 
 export const saleItemSchema = z.object({
   product_id: z.string().min(1),
-  quantity: z.number().int().positive(),
+  quantity: z.number().positive(),
   unit_price: z.number().min(0),
   unit_cost: z.number().min(0),
   discount: z.number().min(0).default(0),

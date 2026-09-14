@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   Settings, 
   Store, 
@@ -26,7 +26,13 @@ import {
   History,
   FileText,
   Filter,
-  ArrowRight
+  ArrowRight,
+  Upload,
+  FileSignature,
+  Send,
+  Loader2,
+  X,
+  Image as ImageIcon
 } from 'lucide-react';
 import { AppShell } from '@/components/layout/app-shell';
 import { Button } from '@/components/ui/button';
@@ -50,11 +56,14 @@ export default function SettingsPage() {
     shopPhone: '+252 61 5500112',
     shopAddress: 'Suuqa Bakaaraha, Mogadishu',
     currency: 'USD',
+    signatureUrl: '',
     receiptHeader: 'TUKAAN SHIINE SUPERMARKET\nSuuqa Bakaaraha, Mogadishu',
     receiptFooter: 'Mahadsanid! Soo Dhowow Mar Kale.',
     lowStockEmailEnabled: true,
     outOfStockEmailEnabled: true,
     alertRecipientEmail: 'admin@tukaan.so',
+    alertRecipientRoles: ['admin'],
+    alertRecipientUserIds: [],
     debtOverdueDays: 7,
     defaultPurchaseUnit: 'kartoon',
     defaultSellingUnit: 'xabo',
@@ -63,6 +72,13 @@ export default function SettingsPage() {
     language: 'so',
     dateFormat: 'DD/MM/YYYY',
   });
+
+  // Signature Upload State
+  const signatureInputRef = useRef<HTMLInputElement>(null);
+  const [isUploadingSignature, setIsUploadingSignature] = useState(false);
+
+  // Email Alert Test State
+  const [isSendingTestEmail, setIsSendingTestEmail] = useState(false);
 
   // Users State
   const [usersList, setUsersList] = useState<SystemUser[]>([]);
@@ -99,12 +115,17 @@ export default function SettingsPage() {
     }
   };
 
+  const [isLoadingUsers, setIsLoadingUsers] = useState(false);
+
   const loadUsers = async () => {
     try {
+      setIsLoadingUsers(true);
       const u = await repository.getUsers();
       setUsersList(u);
     } catch (err) {
       console.error('Error loading users:', err);
+    } finally {
+      setIsLoadingUsers(false);
     }
   };
 
@@ -123,17 +144,102 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
-    if (activeTab === 'audit') {
+    if (activeTab === 'users') {
+      loadUsers();
+    } else if (activeTab === 'audit') {
       loadAuditLogs();
     }
   }, [activeTab, loadAuditLogs]);
 
+  const [isSaving, setIsSaving] = useState(false);
+
   const handleSave = async () => {
     try {
-      await repository.updateSettings(settings);
+      setIsSaving(true);
+      const updated = await repository.updateSettings(settings);
+      setSettings(updated);
       success('Habaynta waa la keydiyey!', 'Dhammaan wax ka beddelka waa la dhaqangeliyey.');
     } catch (err: any) {
-      error('Khalad baa dhacay', err.message);
+      error('Khalad baa dhacay', err.message || 'Lama keydin karin habaynta');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Signature File Selection & Conversion
+  const handleSignatureFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      error('Fadlan soo geli sawir sax ah (PNG, JPG, WebP, SVG)');
+      return;
+    }
+
+    if (file.size > 2 * 1024 * 1024) {
+      error('Cabirka sawirka saxiixa waa inuusan ka badnayn 2MB');
+      return;
+    }
+
+    setIsUploadingSignature(true);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = reader.result as string;
+      setSettings(prev => ({ ...prev, signatureUrl: base64 }));
+      setIsUploadingSignature(false);
+      success('Saxiixa waa la doortay!', 'Fadlan riix "Keydi Dhammaan Habaynta" si aad u keydiso.');
+    };
+    reader.onerror = () => {
+      setIsUploadingSignature(false);
+      error('Khalad baa dhacay intii sawirka la aqrinayey');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleRemoveSignature = () => {
+    setSettings(prev => ({ ...prev, signatureUrl: '' }));
+    if (signatureInputRef.current) {
+      signatureInputRef.current.value = '';
+    }
+    info('Saxiixa waa la tirtiray', 'Riix "Keydi Dhammaan Habaynta" si aad u xaqiijiso.');
+  };
+
+  const toggleRecipientRole = (role: 'admin' | 'seller' | 'reporter') => {
+    if (currentUser?.role !== 'admin') {
+      error('Ogolaansho la\'aan', 'Maamulaha (Admin) kaliya ayaa wax ka beddeli kara xogta digniinaha.');
+      return;
+    }
+    const currentRoles = settings.alertRecipientRoles || ['admin'];
+    const newRoles = currentRoles.includes(role)
+      ? currentRoles.filter(r => r !== role)
+      : [...currentRoles, role];
+    setSettings(prev => ({ ...prev, alertRecipientRoles: newRoles }));
+  };
+
+  // Admin Test Email Dispatch
+  const handleSendTestEmail = async () => {
+    if (currentUser?.role !== 'admin') {
+      error('Ogolaansho la\'aan', 'Maamulaha (Admin) kaliya ayaa diri kara email-ka tijaabada ah.');
+      return;
+    }
+
+    try {
+      setIsSendingTestEmail(true);
+      const res = await repository.sendTestAlertEmail();
+      if (res.success) {
+        const count = res.recipients ? res.recipients.length : 1;
+        const targetsStr = res.recipients ? res.recipients.join(', ') : (settings.alertRecipientEmail || 'recipients');
+        success(
+          `Email-ka tijaabada ah waa la diray (${count})!`,
+          `Waxaa si guul leh loogu diray: ${targetsStr}`
+        );
+      } else {
+        error('Diritaanka wuu fashilmay', res.error || 'Fadlan hubi RESEND_API_KEY iyo domain-ka Resend.');
+      }
+    } catch (err: any) {
+      error('Khalad email-ka', err.message || 'Lama diri karin email-ka tijaabada ah');
+    } finally {
+      setIsSendingTestEmail(false);
     }
   };
 
@@ -257,9 +363,22 @@ export default function SettingsPage() {
             </p>
           </div>
 
-          <Button onClick={handleSave} className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold gap-2 shadow-md shadow-emerald-600/20">
-            <Save className="h-4 w-4" />
-            Keydi Dhammaan Habaynta
+          <Button 
+            onClick={handleSave} 
+            disabled={isSaving}
+            className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold gap-2 shadow-md shadow-emerald-600/20"
+          >
+            {isSaving ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Waa la keydinayaa...
+              </>
+            ) : (
+              <>
+                <Save className="h-4 w-4" />
+                Keydi Dhammaan Habaynta
+              </>
+            )}
           </Button>
         </div>
 
@@ -295,47 +414,150 @@ export default function SettingsPage() {
 
         {/* TAB 1: SHOP PROFILE */}
         {activeTab === 'shop' && (
-          <Card className="p-6 border border-slate-200/80 dark:border-slate-800 shadow-xs space-y-4">
-            <h3 className="text-base font-black text-slate-900 dark:text-white">Xogta Guud ee Dukaanka</h3>
+          <div className="space-y-6">
+            <Card className="p-6 border border-slate-200/80 dark:border-slate-800 shadow-xs space-y-4">
+              <h3 className="text-base font-black text-slate-900 dark:text-white">Xogta Guud ee Dukaanka</h3>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-              <div>
-                <label className="font-bold text-slate-700 dark:text-slate-300">Magaca Dukaanka</label>
-                <Input
-                  value={settings.shopName}
-                  onChange={(e) => setSettings({ ...settings, shopName: e.target.value })}
-                  className="mt-1"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                <div>
+                  <label className="font-bold text-slate-700 dark:text-slate-300">Magaca Dukaanka</label>
+                  <Input
+                    value={settings.shopName}
+                    onChange={(e) => setSettings({ ...settings, shopName: e.target.value })}
+                    className="mt-1"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-bold text-slate-700 dark:text-slate-300">Taleefanka Dukaanka</label>
+                  <Input
+                    value={settings.shopPhone}
+                    onChange={(e) => setSettings({ ...settings, shopPhone: e.target.value })}
+                    className="mt-1 font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-bold text-slate-700 dark:text-slate-300">Cinwaanka (Address)</label>
+                  <Input
+                    value={settings.shopAddress}
+                    onChange={(e) => setSettings({ ...settings, shopAddress: e.target.value })}
+                    className="mt-1"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-bold text-slate-700 dark:text-slate-300">Lacagta (Currency)</label>
+                  <Input
+                    value={settings.currency}
+                    onChange={(e) => setSettings({ ...settings, currency: e.target.value })}
+                    className="mt-1 font-mono font-bold"
+                  />
+                </div>
+              </div>
+            </Card>
+
+            {/* SIGNATURE SECTION: Saxiixa Maamulaha / Mulkiilaha */}
+            <Card className="p-6 border border-slate-200/80 dark:border-slate-800 shadow-xs space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-base font-black text-slate-900 dark:text-white flex items-center gap-2">
+                    <FileSignature className="h-5 w-5 text-emerald-600" />
+                    Saxiixa Maamulaha / Mulkiilaha (Signature)
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Saxiixan wuxuu si toos ah uga soo muuqanayaa warbixinnada rasmiga ah ee la daabaco qeybta Oggolaanshaha (Approved by / Owner).
+                  </p>
+                </div>
+
+                {settings.signatureUrl && (
+                  <Badge className="bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 font-bold text-[11px] self-start sm:self-auto">
+                    ✓ Saxiix Waa Diyaar
+                  </Badge>
+                )}
               </div>
 
-              <div>
-                <label className="font-bold text-slate-700 dark:text-slate-300">Taleefanka Dukaanka</label>
-                <Input
-                  value={settings.shopPhone}
-                  onChange={(e) => setSettings({ ...settings, shopPhone: e.target.value })}
-                  className="mt-1 font-mono"
-                />
-              </div>
+              {/* Hidden File Input */}
+              <input
+                type="file"
+                ref={signatureInputRef}
+                onChange={handleSignatureFileChange}
+                accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                className="hidden"
+              />
 
-              <div>
-                <label className="font-bold text-slate-700 dark:text-slate-300">Cinwaanka (Address)</label>
-                <Input
-                  value={settings.shopAddress}
-                  onChange={(e) => setSettings({ ...settings, shopAddress: e.target.value })}
-                  className="mt-1"
-                />
-              </div>
+              {settings.signatureUrl ? (
+                <div className="space-y-3">
+                  <div className="p-4 bg-slate-50 dark:bg-slate-900/60 rounded-xl border-2 border-dashed border-slate-300 dark:border-slate-700 flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <div className="flex items-center gap-4">
+                      <div className="p-2 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 shadow-inner flex items-center justify-center min-w-36 h-24">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={settings.signatureUrl}
+                          alt="Saxiixa Maamulaha"
+                          className="max-h-20 max-w-44 object-contain"
+                        />
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-900 dark:text-white">Saxiixa Hadda Shaqeynaya</p>
+                        <p className="text-[11px] text-slate-500 font-mono mt-0.5">Muuqaalka Rasmiga ah ee Daabacaadda</p>
+                        <p className="text-[10px] text-emerald-600 font-semibold mt-1 flex items-center gap-1">
+                          <CheckCircle2 className="h-3 w-3" /> Ku xiran warbixinnada dukaanka
+                        </p>
+                      </div>
+                    </div>
 
-              <div>
-                <label className="font-bold text-slate-700 dark:text-slate-300">Lacagta (Currency)</label>
-                <Input
-                  value={settings.currency}
-                  onChange={(e) => setSettings({ ...settings, currency: e.target.value })}
-                  className="mt-1 font-mono font-bold"
-                />
-              </div>
-            </div>
-          </Card>
+                    <div className="flex items-center gap-2 w-full sm:w-auto">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => signatureInputRef.current?.click()}
+                        disabled={isUploadingSignature}
+                        className="flex-1 sm:flex-none text-xs font-bold gap-1.5 h-9"
+                      >
+                        <Upload className="h-3.5 w-3.5 text-slate-600" />
+                        Beddel Saxiixa
+                      </Button>
+
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={handleRemoveSignature}
+                        className="flex-1 sm:flex-none text-xs font-bold gap-1.5 h-9 text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30 border-red-200"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        Tirtir
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div 
+                  onClick={() => signatureInputRef.current?.click()}
+                  className="p-8 border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-emerald-500 dark:hover:border-emerald-500 bg-slate-50 dark:bg-slate-900/40 rounded-2xl flex flex-col items-center justify-center gap-2 text-center cursor-pointer transition-all group"
+                >
+                  <div className="h-12 w-12 rounded-2xl bg-emerald-100 dark:bg-emerald-950/60 text-emerald-600 flex items-center justify-center group-hover:scale-105 transition-transform">
+                    <FileSignature className="h-6 w-6" />
+                  </div>
+                  <div>
+                    <p className="text-xs font-bold text-slate-900 dark:text-white">
+                      Riix halkan si aad u soo geliso sawirka Saxiixa (Upload Signature)
+                    </p>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Qaababka la oggol yahay: PNG (transparent), JPG, SVG, WebP (Ugu badnaan 2MB)
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="mt-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs gap-1.5"
+                  >
+                    <Upload className="h-3.5 w-3.5" /> Soo Geli Sawirka Saxiixa
+                  </Button>
+                </div>
+              )}
+            </Card>
+          </div>
         )}
 
         {/* TAB 2: USERS & ROLES MANAGEMENT */}
@@ -374,100 +596,117 @@ export default function SettingsPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-medium">
-                    {usersList.map((u) => (
-                      <tr key={u.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40">
-                        <td className="px-4 py-3.5 font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                          <div className="h-7 w-7 rounded-lg bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 flex items-center justify-center font-black text-xs">
-                            {u.name.charAt(0).toUpperCase()}
-                          </div>
-                          <span>{u.name}</span>
-                          {currentUser?.id === u.id && (
-                            <span className="text-[10px] text-emerald-600 font-bold">(Adiga)</span>
-                          )}
-                        </td>
-
-                        <td className="px-4 py-3.5 font-mono text-slate-600 dark:text-slate-400">
-                          {u.email}
-                        </td>
-
-                        <td className="px-4 py-3.5">
-                          {u.role === 'admin' ? (
-                            <Badge className="bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 font-bold">
-                              Admin (Full Access)
-                            </Badge>
-                          ) : u.role === 'seller' ? (
-                            <Badge className="bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 font-bold">
-                              Seller / Iibiye (POS Kaliya)
-                            </Badge>
-                          ) : (
-                            <Badge className="bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 font-bold">
-                              Reporter (Read-Only)
-                            </Badge>
-                          )}
-                        </td>
-
-                        <td className="px-4 py-3.5 text-center">
-                          {u.status === 'active' ? (
-                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Active
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-red-50 text-red-700 border border-red-200">
-                              <span className="h-1.5 w-1.5 rounded-full bg-red-500" /> Inactive
-                            </span>
-                          )}
-                        </td>
-
-                        <td className="px-4 py-3.5 text-right space-x-1">
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => handleOpenEditUser(u)}
-                            className="h-7 text-xs font-bold text-slate-600 hover:text-slate-900"
-                            title="Wax ka beddel"
-                          >
-                            <Edit className="h-3.5 w-3.5" />
-                          </Button>
-
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => {
-                              setResetPassUser(u);
-                              setNewResetPassword('');
-                            }}
-                            className="h-7 text-xs font-bold text-amber-600 hover:text-amber-700"
-                            title="Beddel Furaha"
-                          >
-                            <Key className="h-3.5 w-3.5" />
-                          </Button>
-
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => handleToggleStatus(u)}
-                            className={`h-7 text-xs font-bold ${
-                              u.status === 'active' 
-                                ? 'text-orange-600 hover:text-orange-700' 
-                                : 'text-emerald-600 hover:text-emerald-700'
-                            }`}
-                            title={u.status === 'active' ? 'Demi (Deactivate)' : 'Fur (Reactivate)'}
-                          >
-                            {u.status === 'active' ? <UserX className="h-3.5 w-3.5" /> : <UserCheck className="h-3.5 w-3.5" />}
-                          </Button>
-
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => handleDeleteUser(u)}
-                            className="h-7 text-xs font-bold text-red-600 hover:text-red-700"
-                            title="Tirtir"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
+                    {isLoadingUsers ? (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-12 text-center text-slate-400">
+                          <Loader2 className="h-6 w-6 animate-spin mx-auto text-emerald-600 mb-2" />
+                          <p className="font-bold text-xs">Soo dejinaya liiska isticmaalayaasha...</p>
                         </td>
                       </tr>
-                    ))}
+                    ) : usersList.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-10 text-center text-slate-400">
+                          <Users className="h-8 w-8 mx-auto text-slate-300 dark:text-slate-600 mb-2" />
+                          <p className="font-bold text-xs text-slate-600 dark:text-slate-300">Weli ma jiraan users diiwaangashan dukaanka</p>
+                          <p className="text-[11px] text-slate-400 mt-1">Riix badhanka "Samee User Cusub" si aad ugu darto maamulayaal ama shaqaale</p>
+                        </td>
+                      </tr>
+                    ) : (
+                      usersList.map((u) => (
+                        <tr key={u.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40">
+                          <td className="px-4 py-3.5 font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                            <div className="h-7 w-7 rounded-lg bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 flex items-center justify-center font-black text-xs">
+                              {u.name.charAt(0).toUpperCase()}
+                            </div>
+                            <span>{u.name}</span>
+                            {currentUser?.id === u.id && (
+                              <span className="text-[10px] text-emerald-600 font-bold">(Adiga)</span>
+                            )}
+                          </td>
+
+                          <td className="px-4 py-3.5 font-mono text-slate-600 dark:text-slate-400">
+                            {u.email}
+                          </td>
+
+                          <td className="px-4 py-3.5">
+                            {u.role === 'admin' ? (
+                              <Badge className="bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 font-bold">
+                                Admin (Full Access)
+                              </Badge>
+                            ) : u.role === 'seller' ? (
+                              <Badge className="bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 font-bold">
+                                Seller / Iibiye (POS Kaliya)
+                              </Badge>
+                            ) : (
+                              <Badge className="bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 font-bold">
+                                Reporter (Read-Only)
+                              </Badge>
+                            )}
+                          </td>
+
+                          <td className="px-4 py-3.5 text-center">
+                            {u.status === 'active' ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Active
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-red-50 text-red-700 border border-red-200">
+                                <span className="h-1.5 w-1.5 rounded-full bg-red-500" /> Inactive
+                              </span>
+                            )}
+                          </td>
+
+                          <td className="px-4 py-3.5 text-right space-x-1">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => handleOpenEditUser(u)}
+                              className="h-7 text-xs font-bold text-slate-600 hover:text-slate-900"
+                              title="Wax ka beddel"
+                            >
+                              <Edit className="h-3.5 w-3.5" />
+                            </Button>
+
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => {
+                                setResetPassUser(u);
+                                setNewResetPassword('');
+                              }}
+                              className="h-7 text-xs font-bold text-amber-600 hover:text-amber-700"
+                              title="Beddel Furaha"
+                            >
+                              <Key className="h-3.5 w-3.5" />
+                            </Button>
+
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => handleToggleStatus(u)}
+                              className={`h-7 text-xs font-bold ${
+                                u.status === 'active' 
+                                  ? 'text-orange-600 hover:text-orange-700' 
+                                  : 'text-emerald-600 hover:text-emerald-700'
+                              }`}
+                              title={u.status === 'active' ? 'Demi (Deactivate)' : 'Fur (Reactivate)'}
+                            >
+                              {u.status === 'active' ? <UserX className="h-3.5 w-3.5" /> : <UserCheck className="h-3.5 w-3.5" />}
+                            </Button>
+
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => handleDeleteUser(u)}
+                              className="h-7 text-xs font-bold text-red-600 hover:text-red-700"
+                              title="Tirtir"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -627,65 +866,222 @@ export default function SettingsPage() {
 
         {/* TAB 4: NOTIFICATIONS & EMAIL ALERTS */}
         {activeTab === 'notifications' && (
-          <Card className="p-6 border border-slate-200/80 dark:border-slate-800 shadow-xs space-y-5">
-            <div>
-              <h3 className="text-base font-black text-slate-900 dark:text-white flex items-center gap-2">
-                <Mail className="h-5 w-5 text-emerald-600" />
-                Ogaysiisyada Kaydka & Email Alert
-              </h3>
-              <p className="text-xs text-slate-500">
-                Nidaamku wuxuu si toos ah email ugu dirayaa maamulaha markii alaabtu yaraysato ama dhamaato, isagoo ka fogaanaya soo noqnoqosho aan loo baahnayn.
-              </p>
-            </div>
-
-            <div className="space-y-4 text-xs">
-              <div className="flex items-center justify-between p-3.5 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-800">
+          <div className="space-y-6">
+            <Card className="p-6 border border-slate-200/80 dark:border-slate-800 shadow-xs space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <div>
-                  <p className="font-bold text-slate-900 dark:text-white">Email-ka Digniinta Kaydka Yar (Low Stock Alert)</p>
-                  <p className="text-slate-500 text-[11px]">Dir email markii alaabtu gaadho ama ka hooseyso minimum stock.</p>
+                  <h3 className="text-base font-black text-slate-900 dark:text-white flex items-center gap-2">
+                    <Mail className="h-5 w-5 text-emerald-600" />
+                    Ogaysiisyada Kaydka & Resend Email Alerts
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Nidaamku wuxuu si toos ah email ugu dirayaa maamulayaasha iyo shaqaalaha loo asteeyey markii alaabtu yaraysato ama dhamaato, isagoo ka fogaanaya soo noqnoqosho aan loo baahnayn.
+                  </p>
                 </div>
-                <input
-                  type="checkbox"
-                  checked={settings.lowStockEmailEnabled}
-                  onChange={(e) => setSettings({ ...settings, lowStockEmailEnabled: e.target.checked })}
-                  className="h-5 w-5 text-emerald-600 rounded"
-                />
+
+                <Badge className="bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 font-bold text-[11px] self-start sm:self-auto">
+                  Resend Service: Active
+                </Badge>
               </div>
 
-              <div className="flex items-center justify-between p-3.5 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-800">
+              <div className="space-y-4 text-xs">
+                {/* LOW STOCK TOGGLE */}
+                <div className="flex items-center justify-between p-3.5 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-800">
+                  <div>
+                    <p className="font-bold text-slate-900 dark:text-white">Email-ka Digniinta Kaydka Yar (Low Stock Alert)</p>
+                    <p className="text-slate-500 text-[11px]">Dir email markii alaabtu gaadho ama ka hooseyso minimum stock.</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.lowStockEmailEnabled}
+                    onChange={(e) => setSettings({ ...settings, lowStockEmailEnabled: e.target.checked })}
+                    className="h-5 w-5 text-emerald-600 rounded cursor-pointer"
+                  />
+                </div>
+
+                {/* OUT OF STOCK TOGGLE */}
+                <div className="flex items-center justify-between p-3.5 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-800">
+                  <div>
+                    <p className="font-bold text-slate-900 dark:text-white">Email-ka Alaabta Dhamaatay (Out of Stock Alert)</p>
+                    <p className="text-slate-500 text-[11px]">Dir email degdeg ah markii stock-gu noqdo 0.</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.outOfStockEmailEnabled}
+                    onChange={(e) => setSettings({ ...settings, outOfStockEmailEnabled: e.target.checked })}
+                    className="h-5 w-5 text-emerald-600 rounded cursor-pointer"
+                  />
+                </div>
+
+                {/* ROLE RECIPIENTS SELECTION */}
+                <div className="p-4 bg-slate-50 dark:bg-slate-800/40 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <label className="font-bold text-slate-800 dark:text-slate-200 text-xs">
+                        Doorka Loo Dirayo Digniinaha (Alert Recipients by Role)
+                      </label>
+                      <p className="text-[11px] text-slate-500">
+                        Dooro doorarka (Roles) shaqaalaha dukaanka ee ay tahay inay helaan ogeysiisyada kaydka yar iyo alaabta dhamaatay.
+                      </p>
+                    </div>
+                    <Badge className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-mono text-[10px]">
+                      {settings.alertRecipientRoles?.length || 0} Dooro
+                    </Badge>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                    {/* Admin Role Checkbox */}
+                    <div 
+                      onClick={() => toggleRecipientRole('admin')}
+                      className={`p-3 rounded-xl border cursor-pointer transition-all flex items-start justify-between gap-2 ${
+                        settings.alertRecipientRoles?.includes('admin')
+                          ? 'border-emerald-500 bg-emerald-50/50 dark:bg-emerald-950/20'
+                          : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60'
+                      }`}
+                    >
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-1.5 font-bold text-slate-900 dark:text-white text-xs">
+                          <span>Admin</span>
+                          <span className="text-[10px] text-emerald-600 font-semibold">(Maamule)</span>
+                        </div>
+                        <p className="text-[10px] text-slate-500">
+                          {usersList.filter(u => u.role === 'admin').length} user(s) diyaar ah
+                        </p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={settings.alertRecipientRoles?.includes('admin') || false}
+                        onChange={() => {}}
+                        className="h-4 w-4 text-emerald-600 rounded cursor-pointer mt-0.5"
+                      />
+                    </div>
+
+                    {/* Seller Role Checkbox */}
+                    <div 
+                      onClick={() => toggleRecipientRole('seller')}
+                      className={`p-3 rounded-xl border cursor-pointer transition-all flex items-start justify-between gap-2 ${
+                        settings.alertRecipientRoles?.includes('seller')
+                          ? 'border-emerald-500 bg-emerald-50/50 dark:bg-emerald-950/20'
+                          : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60'
+                      }`}
+                    >
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-1.5 font-bold text-slate-900 dark:text-white text-xs">
+                          <span>Seller</span>
+                          <span className="text-[10px] text-amber-600 font-semibold">(Iibiye)</span>
+                        </div>
+                        <p className="text-[10px] text-slate-500">
+                          {usersList.filter(u => u.role === 'seller').length} user(s) diyaar ah
+                        </p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={settings.alertRecipientRoles?.includes('seller') || false}
+                        onChange={() => {}}
+                        className="h-4 w-4 text-emerald-600 rounded cursor-pointer mt-0.5"
+                      />
+                    </div>
+
+                    {/* Reporter Role Checkbox */}
+                    <div 
+                      onClick={() => toggleRecipientRole('reporter')}
+                      className={`p-3 rounded-xl border cursor-pointer transition-all flex items-start justify-between gap-2 ${
+                        settings.alertRecipientRoles?.includes('reporter')
+                          ? 'border-emerald-500 bg-emerald-50/50 dark:bg-emerald-950/20'
+                          : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60'
+                      }`}
+                    >
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-1.5 font-bold text-slate-900 dark:text-white text-xs">
+                          <span>Reporter</span>
+                          <span className="text-[10px] text-blue-600 font-semibold">(Warbixin)</span>
+                        </div>
+                        <p className="text-[10px] text-slate-500">
+                          {usersList.filter(u => u.role === 'reporter').length} user(s) diyaar ah
+                        </p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={settings.alertRecipientRoles?.includes('reporter') || false}
+                        onChange={() => {}}
+                        className="h-4 w-4 text-emerald-600 rounded cursor-pointer mt-0.5"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* CUSTOM RECIPIENT EMAIL */}
                 <div>
-                  <p className="font-bold text-slate-900 dark:text-white">Email-ka Alaabta Dhamaatay (Out of Stock Alert)</p>
-                  <p className="text-slate-500 text-[11px]">Dir email degdeg ah markii stock-gu noqdo 0.</p>
+                  <label className="font-bold text-slate-700 dark:text-slate-300">
+                    Email Dheeraad ah oo Toos ah (Additional / Fallback Alert Email)
+                  </label>
+                  <Input
+                    type="email"
+                    placeholder="admin@dukaanka.so"
+                    value={settings.alertRecipientEmail}
+                    onChange={(e) => setSettings({ ...settings, alertRecipientEmail: e.target.value })}
+                    className="mt-1 font-mono"
+                  />
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    Cinwaankan waxaa sidoo kale lagu dari doonaa liiska email-lada loo diro digniinaha.
+                  </p>
                 </div>
-                <input
-                  type="checkbox"
-                  checked={settings.outOfStockEmailEnabled}
-                  onChange={(e) => setSettings({ ...settings, outOfStockEmailEnabled: e.target.checked })}
-                  className="h-5 w-5 text-emerald-600 rounded"
-                />
+
+                {/* DEBT OVERDUE DAYS */}
+                <div>
+                  <label className="font-bold text-slate-700 dark:text-slate-300">Muddada Digniinta Daynta (Maalmo)</label>
+                  <Input
+                    type="number"
+                    value={settings.debtOverdueDays}
+                    onChange={(e) => setSettings({ ...settings, debtOverdueDays: Number(e.target.value) })}
+                    className="mt-1 font-mono"
+                  />
+                </div>
+              </div>
+            </Card>
+
+            {/* ADMIN TEST EMAIL CARD */}
+            <Card className="p-6 border border-slate-200/80 dark:border-slate-800 shadow-xs space-y-4 bg-slate-50/50 dark:bg-slate-900/30">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-base font-black text-slate-900 dark:text-white flex items-center gap-2">
+                    <Send className="h-5 w-5 text-emerald-600" />
+                    Tijaabada Email-ka (Admin Test Email)
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    U dir email tijaabo ah dhammaan cinwaannada loo asteeyey ({
+                      (settings.alertRecipientRoles || []).join(', ') || 'Ma jiro'
+                    } {settings.alertRecipientEmail ? `+ ${settings.alertRecipientEmail}` : ''}) si loo xaqiijiyo xiriirka Resend.
+                  </p>
+                </div>
+
+                <Button
+                  onClick={handleSendTestEmail}
+                  disabled={isSendingTestEmail || currentUser?.role !== 'admin'}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs gap-2 shadow-md shadow-emerald-600/20 whitespace-nowrap self-start sm:self-auto"
+                >
+                  {isSendingTestEmail ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Waa la dirayaa...
+                    </>
+                  ) : (
+                    <>
+                      <Send className="h-4 w-4" />
+                      Dir Email Tijaabo
+                    </>
+                  )}
+                </Button>
               </div>
 
-              <div>
-                <label className="font-bold text-slate-700 dark:text-slate-300">Email-ka Loo Dirayo Digniinta</label>
-                <Input
-                  type="email"
-                  value={settings.alertRecipientEmail}
-                  onChange={(e) => setSettings({ ...settings, alertRecipientEmail: e.target.value })}
-                  className="mt-1 font-mono"
-                />
-              </div>
-
-              <div>
-                <label className="font-bold text-slate-700 dark:text-slate-300">Muddada Digniinta Daynta (Maalmo)</label>
-                <Input
-                  type="number"
-                  value={settings.debtOverdueDays}
-                  onChange={(e) => setSettings({ ...settings, debtOverdueDays: Number(e.target.value) })}
-                  className="mt-1 font-mono"
-                />
-              </div>
-            </div>
-          </Card>
+              {currentUser?.role !== 'admin' && (
+                <div className="p-3 bg-amber-50 dark:bg-amber-950/30 rounded-xl border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-300 text-xs flex items-center gap-2">
+                  <AlertTriangle className="h-4 w-4 shrink-0" />
+                  <span>Ogolaansho: Maamulaha dukaanka (Admin) kaliya ayaa loo oggol yahay inuu diro email-ka tijaabada ah.</span>
+                </div>
+              )}
+            </Card>
+          </div>
         )}
 
         {/* TAB 5: POS & RECEIPT SETTINGS */}

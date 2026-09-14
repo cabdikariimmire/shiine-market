@@ -75,10 +75,12 @@ export function ReceiptModal({ isOpen, onClose, sale }: ReceiptModalProps) {
                 <div>
                   <p className="font-semibold text-slate-900">
                     {item.product_variant?.product?.name || 'Alaab'} 
-                    <span className="text-emerald-700 ml-1">({item.product_variant?.variant_name || item.unit})</span>
+                    <span className="text-emerald-700 ml-1">
+                      ({item.selling_option_label ? item.selling_option_label : (item.product_variant?.variant_name || item.unit)})
+                    </span>
                   </p>
                   <p className="text-[10px] text-slate-500 font-mono">
-                    {item.quantity} {item.unit} x {formatMoney(item.unit_price)}
+                    {item.actual_quantity_used ? `${item.actual_quantity_used} L` : `${item.quantity} ${item.unit}`} x {formatMoney(item.unit_price)}
                     {item.discount > 0 && ` (-${formatMoney(item.discount)})`}
                   </p>
                 </div>

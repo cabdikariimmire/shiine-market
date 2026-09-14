@@ -1,19 +1,20 @@
 'use client';
 
 import React from 'react';
-import { DashboardMetrics, ProfitReportRow, SalesReportRow, ProductSalesReportRow, ProductSalesReportSummary, ReportDateFilterType } from '@/types';
+import { DashboardMetrics, ProfitReportRow, SalesReportRow, ProductSalesReportRow, ProductSalesReportSummary, OilBatchReportRow, ReportDateFilterType } from '@/types';
 import { formatMoney } from '@/lib/calculations/financials';
 
 interface ReportPrintViewProps {
   dateFilter: ReportDateFilterType;
   customStartDate?: string;
   customEndDate?: string;
-  activeReportTab: 'product_sales' | 'financial' | 'sales' | 'stock' | 'suppliers' | 'debts' | 'expenses';
+  activeReportTab: 'product_sales' | 'financial' | 'sales' | 'stock' | 'suppliers' | 'debts' | 'expenses' | 'oil_batches';
   metrics: DashboardMetrics | null;
   profitRows: ProfitReportRow[];
   salesRows: SalesReportRow[];
   productSalesRows?: ProductSalesReportRow[];
   productSalesSummary?: ProductSalesReportSummary | null;
+  oilBatchRows?: OilBatchReportRow[];
   stockValuation: {
     totalCostValue: number;
     totalRetailValue: number;
@@ -23,6 +24,9 @@ interface ReportPrintViewProps {
   shopName?: string;
   shopPhone?: string;
   shopAddress?: string;
+  signatureUrl?: string;
+  preparedBySignature?: string;
+  preparedByName?: string;
 }
 
 export function ReportPrintView({
@@ -35,10 +39,14 @@ export function ReportPrintView({
   salesRows,
   productSalesRows,
   productSalesSummary,
+  oilBatchRows = [],
   stockValuation,
   shopName = 'TUKAAN SHIINE SUPERMARKET',
   shopPhone = '+252 61 5500112',
   shopAddress = 'Suuqa Bakaaraha, Mogadishu',
+  signatureUrl,
+  preparedBySignature,
+  preparedByName,
 }: ReportPrintViewProps) {
   const getDateFilterLabel = (df: string) => {
     switch (df) {
@@ -74,6 +82,8 @@ export function ReportPrintView({
         return 'Warbixinta Xisaabta Daymaha (Debts & Aging Report)';
       case 'expenses':
         return 'Warbixinta Kharashaadka Howlgalka (Expenses Report)';
+      case 'oil_batches':
+        return 'Warbixinta Dufcadaha Saliidda & Reconciliation (Oil Batches)';
       default:
         return 'Warbixinta Dukaanka (General Shop Report)';
     }
@@ -498,18 +508,114 @@ export function ReportPrintView({
         </div>
       )}
 
+      {/* TAB 5: OIL BATCHES REPORT & RECONCILIATION */}
+      {activeReportTab === 'oil_batches' && (
+        <div className="space-y-4">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-900 border-b border-slate-300 pb-1">
+            Warbixinta Dufcadaha Saliidda, Faa'iidada & Dib-u-heshiisiinta (Oil Batches & Reconciliation)
+          </h3>
+
+          <table className="w-full text-left text-xs border border-slate-300 border-collapse">
+            <thead>
+              <tr className="bg-slate-100 text-slate-900 font-bold border-b border-slate-300 text-[10px] uppercase">
+                <th className="p-2 border-r border-slate-300">Dufcadda (Batch #)</th>
+                <th className="p-2 border-r border-slate-300">Alaabta (Product)</th>
+                <th className="p-2 text-right border-r border-slate-300">Caag</th>
+                <th className="p-2 text-right border-r border-slate-300">Litir (L)</th>
+                <th className="p-2 text-right border-r border-slate-300">Qiimaha ($)</th>
+                <th className="p-2 text-right border-r border-slate-300">Cost/L</th>
+                <th className="p-2 text-right border-r border-slate-300">La Iibiyey</th>
+                <th className="p-2 text-right border-r border-slate-300">Dakhli ($)</th>
+                <th className="p-2 text-right border-r border-slate-300">COGS ($)</th>
+                <th className="p-2 text-right border-r border-slate-300">Faa'iido ($)</th>
+                <th className="p-2 text-right border-r border-slate-300">Filasho</th>
+                <th className="p-2 text-right border-r border-slate-300">Hada Taalla</th>
+                <th className="p-2 text-center">Farqi (Variance)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(!oilBatchRows || oilBatchRows.length === 0) ? (
+                <tr>
+                  <td colSpan={13} className="p-4 text-center text-slate-400">
+                    Ma jiraan dufcado saliid ah oo la helay
+                  </td>
+                </tr>
+              ) : (
+                oilBatchRows.map((r, i) => (
+                  <tr key={i} className="border-b border-slate-200 text-[11px]">
+                    <td className="p-2 font-mono font-bold border-r border-slate-200">{r.batchNumber}</td>
+                    <td className="p-2 font-bold border-r border-slate-200">{r.productName} ({r.variantName})</td>
+                    <td className="p-2 text-right font-mono border-r border-slate-200">{r.containersCount}</td>
+                    <td className="p-2 text-right font-mono font-bold border-r border-slate-200">{r.totalLiters} L</td>
+                    <td className="p-2 text-right font-mono font-bold border-r border-slate-200">${formatMoney(r.totalPurchaseCost)}</td>
+                    <td className="p-2 text-right font-mono text-slate-600 border-r border-slate-200">${r.costPerLiter.toFixed(4)}/L</td>
+                    <td className="p-2 text-right font-mono font-bold border-r border-slate-200">{r.litersSold} L</td>
+                    <td className="p-2 text-right font-mono font-bold text-emerald-800 border-r border-slate-200">${formatMoney(r.totalRevenue)}</td>
+                    <td className="p-2 text-right font-mono text-slate-600 border-r border-slate-200">${formatMoney(r.costOfSoldOil)}</td>
+                    <td className="p-2 text-right font-mono font-black text-purple-800 border-r border-slate-200">+${formatMoney(r.grossProfitLoss)}</td>
+                    <td className="p-2 text-right font-mono text-slate-600 border-r border-slate-200">{r.expectedRemainingLiters} L</td>
+                    <td className="p-2 text-right font-mono font-bold border-r border-slate-200">
+                      {r.actualRemainingLiters !== undefined ? `${r.actualRemainingLiters} L` : '-'}
+                    </td>
+                    <td className="p-2 text-center font-mono font-bold">
+                      {r.varianceLiters !== undefined ? (
+                        <span className={r.varianceLiters < 0 ? 'text-red-700' : 'text-emerald-700'}>
+                          {r.varianceLiters > 0 ? '+' : ''}{r.varianceLiters} L
+                        </span>
+                      ) : (
+                        <span className="text-slate-400">-</span>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       {/* 6. SIGNATURE & VERIFICATION FOOTER */}
-      <div className="pt-8 border-t border-slate-300 mt-8 grid grid-cols-2 gap-8 text-[11px]">
+      <div className="pt-8 border-t border-slate-300 mt-8 grid grid-cols-2 gap-8 text-[11px] print:pt-6 print:mt-6">
         <div>
           <p className="font-bold text-slate-700">Diyaariyey (Prepared by):</p>
-          <div className="mt-8 border-b border-slate-400 w-48"></div>
-          <p className="text-[10px] text-slate-500 mt-1">Maamulaha / Cashier</p>
+          <div className="h-14 flex items-end">
+            {preparedBySignature ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={preparedBySignature}
+                alt="Saxiixa Diyaariyaha"
+                className="max-h-12 max-w-40 object-contain mb-1"
+              />
+            ) : (
+              <div className="w-48 mb-2">
+                {preparedByName && (
+                  <span className="font-semibold text-slate-800 text-[11px] block">{preparedByName}</span>
+                )}
+              </div>
+            )}
+          </div>
+          <div className="border-b border-slate-400 w-48"></div>
+          <p className="text-[10px] text-slate-500 mt-1">
+            {preparedByName ? `${preparedByName} (Maamulaha / Diyaariyaha)` : 'Maamulaha / Cashier'}
+          </p>
         </div>
 
         <div className="text-right flex flex-col items-end">
           <p className="font-bold text-slate-700">Oggolaaday (Approved by):</p>
-          <div className="mt-8 border-b border-slate-400 w-48"></div>
-          <p className="text-[10px] text-slate-500 mt-1">Mulkiilaha Dukaanka (Owner)</p>
+          <div className="h-14 flex items-end justify-end">
+            {signatureUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={signatureUrl}
+                alt="Saxiixa Oggolaanshaha"
+                className="max-h-12 max-w-40 object-contain mb-1"
+              />
+            ) : (
+              <div className="w-48 mb-2"></div>
+            )}
+          </div>
+          <div className="border-b border-slate-400 w-48"></div>
+          <p className="text-[10px] text-slate-500 mt-1">Mulkiilaha Dukaanka (Owner / Approved)</p>
         </div>
       </div>
     </div>
