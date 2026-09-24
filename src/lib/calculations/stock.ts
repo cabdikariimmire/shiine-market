@@ -1,21 +1,24 @@
 import { ProductVariant } from '@/types';
 import { calculateSosDenomination } from './denominations';
+import { cleanPrecision } from './financials';
 
 /**
  * Calculates cost per base selling unit.
- * Example: 1 Jawan = $25, Conversion = 50 kg -> Cost = $25 / 50 = $0.50 per kg.
+ * Example: 1 Jawan = $25.80, Conversion = 50 kg -> Cost = $25.80 / 50 = $0.516 per kg.
+ * Preserves exact unit cost without premature rounding.
  */
 export function calculateCostPerBaseUnit(buyPricePerPurchaseUnit: number, conversionFactor: number = 1): number {
   if (conversionFactor <= 0) return buyPricePerPurchaseUnit;
-  return Math.round((buyPricePerPurchaseUnit / conversionFactor) * 10000) / 10000;
+  return cleanPrecision(buyPricePerPurchaseUnit / conversionFactor);
 }
 
 /**
  * Expected unit profit = Sell Price per base unit - Cost per base unit.
- * Example: Sell = $0.70/kg, Cost = $0.50/kg -> Profit = $0.20/kg.
+ * Example: Sell = $0.60/kg, Cost = $0.516/kg -> Profit = $0.084/kg.
+ * Preserves full precision without premature rounding.
  */
 export function calculateUnitProfit(sellPricePerBaseUnit: number, costPerBaseUnit: number): number {
-  return Math.round((sellPricePerBaseUnit - costPerBaseUnit) * 100) / 100;
+  return cleanPrecision(sellPricePerBaseUnit - costPerBaseUnit);
 }
 
 /**

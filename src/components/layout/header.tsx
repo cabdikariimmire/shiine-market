@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { Menu, Plus, ShoppingCart, LogOut, ShieldCheck, UserCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth/auth-context';
+import { PwaSyncIndicator } from '@/components/pwa/pwa-sync-indicator';
 
 interface HeaderProps {
   onMenuToggle: () => void;
@@ -37,6 +38,9 @@ export function Header({ onMenuToggle, title = "Tukaan Dashboard", lowStockCount
 
       {/* Right Quick Action Buttons */}
       <div className="flex items-center gap-2 sm:gap-3">
+        {/* PWA Sync Indicator */}
+        <PwaSyncIndicator />
+
         {role === 'admin' ? (
           <>
             {/* Quick Product Add */}

@@ -39,7 +39,7 @@ import { Card } from '@/components/ui/card';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter, DialogClose } from '@/components/ui/dialog';
 import { useToast } from '@/components/ui/toast';
 import { repository } from '@/lib/services/repository';
-import { formatMoney } from '@/lib/calculations/financials';
+import { formatMoney, formatUnitMoney } from '@/lib/calculations/financials';
 import { calculateSosDenomination, formatSos } from '@/lib/calculations/denominations';
 import { 
   calculateCostPerBaseUnit, 
@@ -772,7 +772,7 @@ export default function ProductsPage() {
                           <span className="text-[11px] text-slate-400 ml-1">/{v.purchase_unit}</span>
                           {v.conversion_factor > 1 && (
                             <p className="text-[10px] text-slate-400">
-                              (Cost: {formatMoney(costPerBase)}/{v.selling_unit})
+                              (Cost: {formatUnitMoney(costPerBase)}/{v.selling_unit})
                             </p>
                           )}
                         </td>
@@ -791,10 +791,10 @@ export default function ProductsPage() {
                             </div>
                           ) : (
                             <>
-                              {formatMoney(v.sell_price)}
+                              {formatUnitMoney(v.sell_price)}
                               <span className="text-[11px] text-slate-400 ml-1 font-normal">/{v.selling_unit}</span>
                               <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-normal">
-                                +{formatMoney(unitProfit)} faa'iido
+                                +{formatUnitMoney(unitProfit)} faa'iido
                               </p>
                             </>
                           )}

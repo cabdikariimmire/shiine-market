@@ -46,7 +46,7 @@ import {
   calculateBatchCostPerUnit,
   calculateBatchVariance
 } from '@/lib/calculations/stock';
-import { calculateSaleTotal, calculateBatchProfitLoss } from '@/lib/calculations/financials';
+import { calculateSaleTotal, calculateBatchProfitLoss, cleanPrecision, roundToCents, calculateGrossProfit, calculateNetProfit } from '@/lib/calculations/financials';
 import { calculateSosDenomination } from '@/lib/calculations/denominations';
 import { generateId } from '@/lib/utils';
 import { supabase, isSupabaseConfigured, supabaseUrl, supabaseAnonKey } from '@/lib/supabase/client';
@@ -2627,10 +2627,24 @@ class ShopRepository {
     newCustomer?: { name: string; phone: string };
     dueDate?: string;
     notes?: string;
+    clientTransactionId?: string;
   }): Promise<Sale> {
     const rawItems = params.cartItems || params.items || [];
     if (rawItems.length === 0) {
       throw new Error('Ma jiro wax alaab ah oo ku jira gaariga iibka (Cart is empty)');
+    }
+
+    // IDEMPOTENCY CHECK: If clientTransactionId was provided, verify if sale already exists on server
+    if (params.clientTransactionId) {
+      const { data: existingSale } = await supabase
+        .from('sales')
+        .select('*, customer:customers(*), items:sale_items(*, product_variant:product_variants(*, product:products(*)))')
+        .eq('id', params.clientTransactionId)
+        .maybeSingle();
+
+      if (existingSale) {
+        return existingSale as Sale;
+      }
     }
 
     let customerId = params.customerId;
@@ -2640,7 +2654,7 @@ class ShopRepository {
     }
 
     // Check if any cart item has special management mode, denomination pricing mode, or actual quantity override
-    const hasSpecialItems = rawItems.some(i => 
+    const hasSpecialItems = Boolean(params.clientTransactionId) || rawItems.some(i => 
       i.variant?.management_mode === 'amount_based' ||
       i.variant?.management_mode === 'pack_based' ||
       i.actual_quantity_used !== undefined ||
@@ -2650,7 +2664,7 @@ class ShopRepository {
       (i.variant?.sos_price && i.variant.sos_price > 0)
     );
 
-    // 1. Try PostgreSQL RPC `execute_sale` ONLY if no special/denomination items are present
+    // 1. Try PostgreSQL RPC `execute_sale` ONLY if no special/denomination items and no clientTransactionId are present
     if (!hasSpecialItems) {
       const itemsJson = rawItems.map(item => ({
         variant_id: item.variant.id,
@@ -2735,7 +2749,7 @@ class ShopRepository {
       const itemName = (curVar?.product as any)?.name || item.product?.name || item.variant?.variant_name || 'Alaabta';
 
       if (currentStock < qtyToDeduct) {
-        throw new Error(`Stock-ga kuma filna: ${itemName}. Waxaa haray kaliya ${currentStock} ${unitLabel}, laakiin waxaad isku dayday inaad iibiso ${qtyToDeduct} ${unitLabel}.`);
+        throw new Error(`Stock-ka ayaa is beddelay intii aad offline ahayd ama kuma filna: ${itemName}. Waxaa haray kaliya ${currentStock} ${unitLabel}, laakiin waxaad isku dayday inaad iibiso ${qtyToDeduct} ${unitLabel}.`);
       }
     }
 
@@ -2748,7 +2762,7 @@ class ShopRepository {
     const debtAmount = Math.max(0, Math.round((totalAmount - amountPaid) * 100) / 100);
     const grossProfit = saleCalc.grossProfit;
 
-    const saleId = generateId();
+    const saleId = params.clientTransactionId || generateId();
 
     const { data: createdSale, error: saleErr } = await supabase
       .from('sales')
@@ -2760,8 +2774,8 @@ class ShopRepository {
         total_amount: totalAmount,
         amount_paid: amountPaid,
         debt_amount: debtAmount,
-        cost_amount: costAmount,
-        gross_profit: grossProfit,
+        cost_amount: roundToCents(costAmount),
+        gross_profit: roundToCents(grossProfit),
         payment_method: params.paymentMethod,
         notes: params.notes || null,
         created_at: new Date().toISOString(),
@@ -2770,6 +2784,14 @@ class ShopRepository {
       .single();
 
     if (saleErr) {
+      if (params.clientTransactionId && ((saleErr as any).code === '23505' || saleErr.message?.includes('duplicate key') || saleErr.message?.includes('violates unique constraint'))) {
+        const { data: dupSale } = await supabase
+          .from('sales')
+          .select('*, customer:customers(*), items:sale_items(*, product_variant:product_variants(*, product:products(*)))')
+          .eq('id', params.clientTransactionId)
+          .single();
+        if (dupSale) return dupSale as Sale;
+      }
       throw new Error(`Khalad iibka: ${saleErr.message}`);
     }
 
@@ -2786,22 +2808,21 @@ class ShopRepository {
         itemLineTotal = denomRes.denominationUsd;
       }
 
-      // If oil product, resolve active batch for FIFO deduction and batch cost
+      // Resolve active batch for FIFO deduction and batch cost
       let activeBatch: ProductBatch | null = null;
       let effectiveUnitCost = item.unitCost;
 
-      if (isAmountBased) {
-        activeBatch = await this.getActiveBatch(item.variant.id);
-        if (activeBatch) {
-          effectiveUnitCost = activeBatch.cost_per_liter || item.unitCost;
-          const remainingQty = Number(activeBatch.remaining_quantity || 0);
-          const newBatchRemaining = Math.max(0, Number((remainingQty - actualLitersUsed).toFixed(4)));
-          await this.updateBatchRemaining(activeBatch.id, newBatchRemaining);
-        }
+      activeBatch = await this.getActiveBatch(item.variant.id);
+      if (activeBatch) {
+        effectiveUnitCost = activeBatch.cost_per_unit || activeBatch.cost_per_liter || item.unitCost;
+        const qtyToDeduct = isAmountBased ? actualLitersUsed : Number(item.quantity);
+        const remainingQty = Number(activeBatch.remaining_quantity || 0);
+        const newBatchRemaining = Math.max(0, Number((remainingQty - qtyToDeduct).toFixed(4)));
+        await this.updateBatchRemaining(activeBatch.id, newBatchRemaining);
       }
 
-      const itemCostTotal = isAmountBased ? Number((actualLitersUsed * effectiveUnitCost).toFixed(4)) : Number((item.quantity * effectiveUnitCost).toFixed(4));
-      const itemProfit = Math.round((itemLineTotal - itemCostTotal) * 100) / 100;
+      const itemCostTotal = isAmountBased ? cleanPrecision(actualLitersUsed * effectiveUnitCost) : cleanPrecision(item.quantity * effectiveUnitCost);
+      const itemProfit = cleanPrecision(itemLineTotal - itemCostTotal);
 
       const saleItemPayload: any = {
         id: generateId(),
@@ -2813,7 +2834,7 @@ class ShopRepository {
         unit_cost: effectiveUnitCost,
         discount: item.discount || 0,
         total_price: itemLineTotal,
-        gross_profit: itemProfit,
+        gross_profit: roundToCents(itemProfit),
         batch_id: activeBatch?.id || null,
         actual_quantity_used: isAmountBased ? actualLitersUsed : null,
         selling_method: item.selling_method || (isAmountBased ? (item.amount_based_value ? 'money' : 'liter') : 'liter'),
@@ -2869,31 +2890,34 @@ class ShopRepository {
     }
 
     if (debtAmount > 0 && customerId) {
-      const debtId = generateId();
-      const itemsSummary = rawItems.map(i => `${i.product.name} (${i.quantity} ${i.variant.selling_unit})`).join(', ');
-      await supabase.from('debts').insert([{
-        id: debtId,
-        customer_id: customerId,
-        sale_id: saleId,
-        items_summary: itemsSummary,
-        original_amount: totalAmount,
-        amount_paid: amountPaid,
-        remaining_balance: debtAmount,
-        due_date: params.dueDate || null,
-        status: amountPaid > 0 ? 'partial' : 'unpaid',
-        notes: params.notes || 'Dayn POS iib ah',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }]);
-
-      const { data: cust } = await supabase.from('customers').select('*').eq('id', customerId).single();
-      if (cust) {
-        await supabase.from('customers').update({
-          total_debt: Number(cust.total_debt || 0) + totalAmount,
-          paid_debt: Number(cust.paid_debt || 0) + amountPaid,
-          remaining_debt: Number(cust.remaining_debt || 0) + debtAmount,
+      const { data: existingDebt } = await supabase.from('debts').select('id').eq('sale_id', saleId).maybeSingle();
+      if (!existingDebt) {
+        const debtId = generateId();
+        const itemsSummary = rawItems.map(i => `${i.product.name} (${i.quantity} ${i.variant.selling_unit})`).join(', ');
+        await supabase.from('debts').insert([{
+          id: debtId,
+          customer_id: customerId,
+          sale_id: saleId,
+          items_summary: itemsSummary,
+          original_amount: totalAmount,
+          amount_paid: amountPaid,
+          remaining_balance: debtAmount,
+          due_date: params.dueDate || null,
+          status: amountPaid > 0 ? 'partial' : 'unpaid',
+          notes: params.notes || 'Dayn POS iib ah',
+          created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
-        }).eq('id', customerId);
+        }]);
+
+        const { data: cust } = await supabase.from('customers').select('*').eq('id', customerId).single();
+        if (cust) {
+          await supabase.from('customers').update({
+            total_debt: Number(cust.total_debt || 0) + totalAmount,
+            paid_debt: Number(cust.paid_debt || 0) + amountPaid,
+            remaining_debt: Number(cust.remaining_debt || 0) + debtAmount,
+            updated_at: new Date().toISOString(),
+          }).eq('id', customerId);
+        }
       }
     }
 
@@ -2991,20 +3015,21 @@ class ShopRepository {
     }
 
     const discount = Number(payload.overallDiscount || 0);
-    const totalAmount = Math.max(0, subtotal - discount);
+    const totalAmount = Math.max(0, roundToCents(subtotal - discount));
     const amountPaid = payload.paymentMethod === 'cash' ? totalAmount : Math.min(totalAmount, Math.max(0, Number(payload.amountPaid || 0)));
-    const debtAmount = Math.max(0, totalAmount - amountPaid);
-    const grossProfit = totalAmount - totalCost;
+    const debtAmount = Math.max(0, roundToCents(totalAmount - amountPaid));
+    const exactCost = cleanPrecision(totalCost);
+    const grossProfit = cleanPrecision(totalAmount - exactCost);
 
     await supabase.from('sales').update({
       customer_id: payload.customerId || null,
-      subtotal,
-      discount,
+      subtotal: roundToCents(subtotal),
+      discount: roundToCents(discount),
       total_amount: totalAmount,
       amount_paid: amountPaid,
       debt_amount: debtAmount,
-      cost_amount: totalCost,
-      gross_profit: grossProfit,
+      cost_amount: roundToCents(exactCost),
+      gross_profit: roundToCents(grossProfit),
       payment_method: payload.paymentMethod || 'cash',
       notes: payload.notes || null,
       created_at: payload.createdAt || oldSale.created_at,
@@ -3015,8 +3040,9 @@ class ShopRepository {
     for (const item of payload.items || []) {
       const { data: v } = await supabase.from('product_variants').select('*').eq('id', item.productVariantId).single();
       const unitCost = v ? calculateCostPerBaseUnit(v.buy_price, v.conversion_factor) : 0;
-      const itemTotal = item.quantity * item.unitPrice - (item.discount || 0);
-      const itemProfit = itemTotal - (item.quantity * unitCost);
+      const itemTotal = roundToCents(item.quantity * item.unitPrice - (item.discount || 0));
+      const itemCostTotal = cleanPrecision(item.quantity * unitCost);
+      const itemProfit = cleanPrecision(itemTotal - itemCostTotal);
 
       await supabase.from('sale_items').insert([{
         id: generateId(),
@@ -3028,7 +3054,7 @@ class ShopRepository {
         unit_cost: unitCost,
         discount: item.discount || 0,
         total_price: itemTotal,
-        gross_profit: itemProfit,
+        gross_profit: roundToCents(itemProfit),
         created_at: new Date().toISOString(),
       }]);
     }
@@ -4074,7 +4100,9 @@ class ShopRepository {
 
     const startOfMonthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
 
-    let salesQuery = supabase.from('sales').select('*');
+    let salesQuery = supabase
+      .from('sales')
+      .select('*, items:sale_items(id, quantity, unit_price, unit_cost, total_price, gross_profit)');
     let expensesQuery = supabase.from('expenses').select('*');
     let debtPaymentsQuery = supabase.from('debt_payments').select('*');
 
@@ -4114,15 +4142,40 @@ class ShopRepository {
     const variantsList = variantsRes.data || [];
     const debtsList = debtsRes.data || [];
 
-    const todaySales = salesList.reduce((sum, s) => sum + Number(s.total_amount || 0), 0);
+    const todaySales = roundToCents(salesList.reduce((sum, s) => sum + Number(s.total_amount || 0), 0));
     const todaySalesCount = salesList.length;
-    const todayCashReceived = salesList.reduce((sum, s) => sum + Number(s.amount_paid || 0), 0);
-    const todayNewDebt = salesList.reduce((sum, s) => sum + Number(s.debt_amount || 0), 0);
-    const todayDebtPayments = debtPaymentsList.reduce((sum, p) => sum + Number(p.amount || 0), 0);
-    const todayCostOfGoods = salesList.reduce((sum, s) => sum + Number(s.cost_amount || 0), 0);
-    const todayGrossProfit = salesList.reduce((sum, s) => sum + Number(s.gross_profit || 0), 0);
-    const todayExpenses = expensesList.reduce((sum, e) => sum + Number(e.amount || 0), 0);
-    const todayNetProfit = todayGrossProfit - todayExpenses;
+    const todayDebtPayments = roundToCents(debtPaymentsList.reduce((sum, p) => sum + Number(p.amount || 0), 0));
+    const todayCashFromSales = roundToCents(salesList.reduce((sum, s) => sum + Number(s.amount_paid || 0), 0));
+    const todayCashReceived = roundToCents(todayCashFromSales + todayDebtPayments);
+    const todayNewDebt = roundToCents(salesList.reduce((sum, s) => sum + Number(s.debt_amount || 0), 0));
+
+    // Authoritative COGS and Gross Profit calculated from exact sold quantities and unit costs
+    let totalCostOfGoodsExact = 0;
+    let totalGrossProfitExact = 0;
+
+    for (const s of salesList) {
+      const items = (s as any).items || [];
+      if (items.length > 0) {
+        for (const item of items) {
+          const qty = Number(item.quantity || 0);
+          const unitCost = item.unit_cost !== undefined && item.unit_cost !== null ? Number(item.unit_cost) : 0;
+          const lineTotal = Number(item.total_price || (qty * Number(item.unit_price || 0)));
+          const lineCost = qty * unitCost;
+          const lineProfit = unitCost > 0 ? cleanPrecision(lineTotal - lineCost) : Number(item.gross_profit || 0);
+          
+          totalCostOfGoodsExact += lineCost;
+          totalGrossProfitExact += lineProfit;
+        }
+      } else {
+        totalCostOfGoodsExact += Number(s.cost_amount || 0);
+        totalGrossProfitExact += Number(s.gross_profit || 0);
+      }
+    }
+
+    const todayCostOfGoods = roundToCents(totalCostOfGoodsExact);
+    const todayGrossProfit = roundToCents(totalGrossProfitExact);
+    const todayExpenses = roundToCents(expensesList.reduce((sum, e) => sum + Number(e.amount || 0), 0));
+    const todayNetProfit = roundToCents(todayGrossProfit - todayExpenses);
 
     const totalProductsCount = productsCountRes.count ?? 0;
     const totalVariantsCount = variantsList.filter(v => v.is_active && !v.is_pending).length;
@@ -4202,13 +4255,15 @@ class ShopRepository {
       throw new Error('Seller / Iibiye ma laha ogolaansho uu ku eego warbixinnada faa\'iidada.');
     }
 
-    const [salesRes, expensesRes] = await Promise.all([
-      supabase.from('sales').select('created_at, total_amount, cost_amount, gross_profit, amount_paid'),
+    const [salesRes, expensesRes, debtPaymentsRes] = await Promise.all([
+      supabase.from('sales').select('created_at, total_amount, cost_amount, gross_profit, amount_paid, items:sale_items(id, quantity, unit_price, unit_cost, total_price, gross_profit)'),
       supabase.from('expenses').select('date, amount'),
+      supabase.from('debt_payments').select('created_at, amount'),
     ]);
 
     const sales = salesRes.data || [];
     const expenses = expensesRes.data || [];
+    const debtPayments = debtPaymentsRes.data || [];
 
     const grouped: Record<string, ProfitReportRow> = {};
 
@@ -4226,9 +4281,40 @@ class ShopRepository {
         };
       }
       grouped[date].salesRevenue += Number(s.total_amount || 0);
-      grouped[date].cogs += Number(s.cost_amount || 0);
-      grouped[date].grossProfit += Number(s.gross_profit || 0);
       grouped[date].cashReceived += Number(s.amount_paid || 0);
+
+      const items = (s as any).items || [];
+      if (items.length > 0) {
+        for (const item of items) {
+          const qty = Number(item.quantity || 0);
+          const unitCost = item.unit_cost !== undefined && item.unit_cost !== null ? Number(item.unit_cost) : 0;
+          const lineTotal = Number(item.total_price || (qty * Number(item.unit_price || 0)));
+          const lineCost = qty * unitCost;
+          const lineProfit = unitCost > 0 ? cleanPrecision(lineTotal - lineCost) : Number(item.gross_profit || 0);
+          
+          grouped[date].cogs += lineCost;
+          grouped[date].grossProfit += lineProfit;
+        }
+      } else {
+        grouped[date].cogs += Number(s.cost_amount || 0);
+        grouped[date].grossProfit += Number(s.gross_profit || 0);
+      }
+    }
+
+    for (const p of debtPayments) {
+      const date = p.created_at ? p.created_at.split('T')[0] : 'Unknown';
+      if (!grouped[date]) {
+        grouped[date] = {
+          date,
+          salesRevenue: 0,
+          cogs: 0,
+          grossProfit: 0,
+          expenses: 0,
+          netProfit: 0,
+          cashReceived: 0,
+        };
+      }
+      grouped[date].cashReceived += Number(p.amount || 0);
     }
 
     for (const e of expenses) {
@@ -4248,7 +4334,12 @@ class ShopRepository {
     }
 
     for (const date of Object.keys(grouped)) {
-      grouped[date].netProfit = grouped[date].grossProfit - grouped[date].expenses;
+      grouped[date].salesRevenue = roundToCents(grouped[date].salesRevenue);
+      grouped[date].cogs = roundToCents(grouped[date].cogs);
+      grouped[date].grossProfit = roundToCents(grouped[date].grossProfit);
+      grouped[date].expenses = roundToCents(grouped[date].expenses);
+      grouped[date].netProfit = roundToCents(grouped[date].grossProfit - grouped[date].expenses);
+      grouped[date].cashReceived = roundToCents(grouped[date].cashReceived);
     }
 
     return Object.values(grouped).sort((a, b) => b.date.localeCompare(a.date));
@@ -4362,9 +4453,12 @@ class ShopRepository {
         const pName = prod?.name || 'Alaab';
         const vName = pv?.variant_name || '';
         const unit = item.unit || pv?.selling_unit || 'KG';
-        const lineTotal = Math.round(Number(item.total_price || 0) * 100) / 100;
+        const lineTotal = Number(item.total_price || 0);
         const lineQty = Number(Number(item.quantity || 0).toFixed(4));
-        const lineProfit = Math.round(Number(item.gross_profit || 0) * 100) / 100;
+        const unitCost = item.unit_cost !== undefined && item.unit_cost !== null ? Number(item.unit_cost) : 0;
+        const lineCost = lineQty * unitCost;
+        // Exact profit calculation from actual sold quantity and exact unit cost:
+        const lineProfit = unitCost > 0 ? cleanPrecision(lineTotal - lineCost) : Number(item.gross_profit || 0);
 
         let itemPaid = 0;
         let itemDebt = 0;
@@ -4396,15 +4490,21 @@ class ShopRepository {
         }
 
         productMap[variantId].quantitySold = Number((productMap[variantId].quantitySold + lineQty).toFixed(4));
-        productMap[variantId].totalSales = Math.round((productMap[variantId].totalSales + lineTotal) * 100) / 100;
-        productMap[variantId].totalPaid = Math.round((productMap[variantId].totalPaid + itemPaid) * 100) / 100;
-        productMap[variantId].totalDebt = Math.round((productMap[variantId].totalDebt + itemDebt) * 100) / 100;
-        productMap[variantId].totalProfit = Math.round((productMap[variantId].totalProfit + lineProfit) * 100) / 100;
+        productMap[variantId].totalSales += lineTotal;
+        productMap[variantId].totalPaid += itemPaid;
+        productMap[variantId].totalDebt += itemDebt;
+        productMap[variantId].totalProfit += lineProfit;
         productMap[variantId].transactionCount += 1;
       }
     }
 
-    let rows = Object.values(productMap);
+    let rows = Object.values(productMap).map(r => ({
+      ...r,
+      totalSales: roundToCents(r.totalSales),
+      totalPaid: roundToCents(r.totalPaid),
+      totalDebt: roundToCents(r.totalDebt),
+      totalProfit: roundToCents(r.totalProfit),
+    }));
 
     if (searchQuery && searchQuery.trim()) {
       const q = searchQuery.toLowerCase().trim();
@@ -4419,10 +4519,10 @@ class ShopRepository {
 
     const summary: ProductSalesReportSummary = rows.reduce((acc, r) => ({
       totalQuantity: Number((acc.totalQuantity + r.quantitySold).toFixed(4)),
-      totalSales: Math.round((acc.totalSales + r.totalSales) * 100) / 100,
-      totalPaid: Math.round((acc.totalPaid + r.totalPaid) * 100) / 100,
-      totalDebt: Math.round((acc.totalDebt + r.totalDebt) * 100) / 100,
-      totalProfit: Math.round((acc.totalProfit + r.totalProfit) * 100) / 100,
+      totalSales: roundToCents(acc.totalSales + r.totalSales),
+      totalPaid: roundToCents(acc.totalPaid + r.totalPaid),
+      totalDebt: roundToCents(acc.totalDebt + r.totalDebt),
+      totalProfit: roundToCents(acc.totalProfit + r.totalProfit),
       uniqueProductsCount: rows.length,
     }), {
       totalQuantity: 0,

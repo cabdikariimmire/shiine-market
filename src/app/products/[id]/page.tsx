@@ -23,7 +23,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/toast';
 import { repository } from '@/lib/services/repository';
-import { formatMoney } from '@/lib/calculations/financials';
+import { formatMoney, formatUnitMoney } from '@/lib/calculations/financials';
 import { calculateCostPerBaseUnit, calculateUnitProfit, getStockStatus } from '@/lib/calculations/stock';
 import { Product, ProductVariant, StockMovement } from '@/types';
 
@@ -224,7 +224,7 @@ export default function ProductDetailPage() {
                     <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl">
                       <p className="text-[10px] text-slate-400 uppercase font-sans">Cost/Base Unit</p>
                       <p className="text-base font-bold text-slate-900 dark:text-white mt-0.5">
-                        {formatMoney(calculateCostPerBaseUnit(selectedVariant.buy_price, selectedVariant.conversion_factor))}
+                        {formatUnitMoney(calculateCostPerBaseUnit(selectedVariant.buy_price, selectedVariant.conversion_factor))}
                       </p>
                       <p className="text-[10px] text-slate-500 font-sans">1 {selectedVariant.selling_unit}</p>
                     </div>

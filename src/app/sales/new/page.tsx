@@ -46,6 +46,21 @@ import {
   isValidSellableQuantity 
 } from '@/lib/calculations/stock';
 import { AmountSellingOption, CartItem, Category, Customer, PaymentMethod, ProductVariant, Sale } from '@/types';
+import { 
+  cacheProducts, 
+  cacheCategories, 
+  cacheCustomers, 
+  searchCachedProducts, 
+  getCachedProductByBarcode, 
+  updateCachedProductStock, 
+  saveOfflineCustomer, 
+  queueOfflineTransaction,
+  getCachedCategories,
+  getCachedCustomers
+} from '@/lib/offline/db';
+import { OfflineSaleItem, OfflineTransaction } from '@/lib/offline/types';
+import { syncEngine } from '@/lib/offline/sync-engine';
+import { generateId } from '@/lib/utils';
 
 export default function POSTerminalPage() {
   const { success, error, info } = useToast();
@@ -86,23 +101,74 @@ export default function POSTerminalPage() {
   const [customOilAmount, setCustomOilAmount] = useState('');
   const [customOilCurrency, setCustomOilCurrency] = useState<'$' | 'SOS'>('SOS');
 
+  const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
+
   const loadData = useCallback(async () => {
     try {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        const [cachedProds, cachedCats, cachedCusts] = await Promise.all([
+          searchCachedProducts(search, selectedCategory),
+          getCachedCategories(),
+          getCachedCustomers(),
+        ]);
+        setVariants(cachedProds);
+        if (cachedCats.length > 0) setCategories(cachedCats);
+        if (cachedCusts.length > 0) setCustomers(cachedCusts);
+        return;
+      }
+
       const [res, cats, custs] = await Promise.all([
-        repository.getVariantsPaginated(search, selectedCategory, 'all', 1, 40),
+        repository.getVariantsPaginated(search, selectedCategory, 'all', 1, 1000),
         repository.getCategories(),
         repository.getCustomers(),
       ]);
-      setVariants(res.data.filter(v => !v.is_pending));
+      const activeVars = res.data.filter(v => !v.is_pending);
+      setVariants(activeVars);
       setCategories(cats);
       setCustomers(custs);
+
+      // Cache locally in IndexedDB in the background
+      cacheProducts(activeVars).catch(console.warn);
+      cacheCategories(cats).catch(console.warn);
+      cacheCustomers(custs).catch(console.warn);
     } catch (err) {
-      console.error('Error loading POS data:', err);
+      console.warn('Network issue loading POS data, falling back to offline cache:', err);
+      try {
+        const [cachedProds, cachedCats, cachedCusts] = await Promise.all([
+          searchCachedProducts(search, selectedCategory),
+          getCachedCategories(),
+          getCachedCustomers(),
+        ]);
+        setVariants(cachedProds);
+        if (cachedCats.length > 0) setCategories(cachedCats);
+        if (cachedCusts.length > 0) setCustomers(cachedCusts);
+      } catch (dbErr) {
+        console.error('Failed to load from offline cache:', dbErr);
+      }
     }
   }, [search, selectedCategory]);
 
   useEffect(() => {
     loadData();
+  }, [loadData]);
+
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      loadData();
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      loadData();
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
   }, [loadData]);
 
   // Set default due date (7 days from now)
@@ -643,6 +709,150 @@ export default function POSTerminalPage() {
 
     const numDiscount = parseFloat(overallDiscount) || 0;
     const numPaid = paymentMethod === 'cash' ? totals.totalAmount : (parseFloat(amountPaidInput) || 0);
+    const calculatedDebt = Math.max(0, Math.round((totals.totalAmount - numPaid) * 100) / 100);
+
+    const executeOfflineSale = async () => {
+      const clientTxId = generateId();
+      const offlineItems: OfflineSaleItem[] = cart.map(item => {
+        const isOil = item.variant?.management_mode === 'amount_based' || item.actual_quantity_used !== undefined;
+        return {
+          variant_id: item.variant.id,
+          product_id: item.product.id,
+          product_name: item.product.name,
+          variant_name: item.variant.variant_name,
+          quantity: item.quantity,
+          unit: item.variant.selling_unit,
+          unit_price: item.unitPrice,
+          unit_cost: item.unitCost, // exact unit cost snapshot preserved
+          discount: item.discount || 0,
+          total_price: item.totalPrice,
+          gross_profit: item.grossProfit,
+          pricing_mode: item.pricing_mode || 'fixed',
+          sos_price: item.sosPrice,
+          actual_quantity_used: item.actual_quantity_used,
+          selling_method: item.selling_method,
+          selling_option_label: item.selling_option_label,
+        };
+      });
+
+      let custSnapshot: { id?: string; name?: string; phone?: string } | null = null;
+      let effectiveCustId = selectedCustomerId || null;
+
+      if (selectedCustomerId) {
+        const found = customers.find(c => c.id === selectedCustomerId);
+        if (found) {
+          custSnapshot = { id: found.id, name: found.name, phone: found.phone };
+        }
+      } else if (newCustName.trim() && newCustPhone.trim()) {
+        const tempCustId = generateId();
+        effectiveCustId = tempCustId;
+        custSnapshot = { id: tempCustId, name: newCustName.trim(), phone: newCustPhone.trim() };
+        saveOfflineCustomer({
+          id: tempCustId,
+          name: newCustName.trim(),
+          phone: newCustPhone.trim(),
+          total_debt: calculatedDebt,
+          paid_debt: 0,
+          remaining_debt: calculatedDebt,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        } as Customer).catch(console.warn);
+      }
+
+      const offlineTx: OfflineTransaction = {
+        client_transaction_id: clientTxId,
+        shop_id: null,
+        seller_id: null,
+        created_at: new Date().toISOString(),
+        device_timestamp: Date.now(),
+        payment_method: paymentMethod,
+        amount_paid: numPaid,
+        debt_amount: calculatedDebt,
+        due_date: paymentMethod !== 'cash' ? dueDate : null,
+        subtotal: totals.subtotal,
+        discount: totals.totalDiscount,
+        total_amount: totals.totalAmount,
+        cost_amount: totals.costAmount,
+        gross_profit: totals.grossProfit,
+        notes: saleNotes ? `${saleNotes} (Offline)` : 'Offline POS Sale',
+        customer_id: effectiveCustId,
+        customer_snapshot: custSnapshot,
+        items: offlineItems,
+        status: 'PENDING',
+        retry_count: 0,
+        last_sync_error: null,
+        synced_at: null,
+        server_sale_id: null,
+      };
+
+      // 1. Save to durable offline queue in IndexedDB
+      await queueOfflineTransaction(offlineTx);
+
+      // 2. Immediately deduct local stock in IndexedDB and in-memory state
+      for (const item of cart) {
+        const isOil = item.variant?.management_mode === 'amount_based' || item.actual_quantity_used !== undefined;
+        const qtyToDeduct = isOil && item.actual_quantity_used !== undefined ? item.actual_quantity_used : item.quantity;
+        await updateCachedProductStock(item.variant.id, -qtyToDeduct);
+      }
+
+      setVariants(prev => prev.map(v => {
+        const cartItem = cart.find(c => c.variant.id === v.id);
+        if (cartItem) {
+          const qty = (cartItem.actual_quantity_used !== undefined) ? cartItem.actual_quantity_used : cartItem.quantity;
+          return {
+            ...v,
+            stock_quantity: Math.max(0, Number((v.stock_quantity - qty).toFixed(4))),
+          };
+        }
+        return v;
+      }));
+
+      // 3. Construct local Sale object for receipt modal
+      const localSale: Sale = {
+        id: clientTxId,
+        shop_id: '',
+        customer_id: effectiveCustId || undefined,
+        subtotal: totals.subtotal,
+        discount: totals.totalDiscount,
+        total_amount: totals.totalAmount,
+        amount_paid: numPaid,
+        debt_amount: calculatedDebt,
+        cost_amount: totals.costAmount,
+        gross_profit: totals.grossProfit,
+        payment_method: paymentMethod,
+        notes: 'Offline - Iibka waxaa lagu kaydiyey qalabka',
+        created_at: new Date().toISOString(),
+        customer: custSnapshot as any,
+        items: cart.map(i => ({
+          id: generateId(),
+          sale_id: clientTxId,
+          product_variant_id: i.variant.id,
+          quantity: i.quantity,
+          unit: i.variant.selling_unit,
+          unit_price: i.unitPrice,
+          unit_cost: i.unitCost,
+          discount: i.discount || 0,
+          total_price: i.totalPrice,
+          gross_profit: i.grossProfit,
+          selling_option_label: i.selling_option_label,
+          product_variant: {
+            ...i.variant,
+            product: i.product,
+          },
+        })) as any,
+      };
+
+      setCompletedSale(localSale);
+      success('Offline - Iibka waxaa lagu kaydiyey qalabka', `Wadarta: ${formatMoney(totals.totalAmount)} (Waxaa la diri doonaa marka internetku soo laabto)`);
+      clearCart();
+      syncEngine.refreshCounts();
+    };
+
+    // If currently offline, directly execute offline sale
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      await executeOfflineSale();
+      return;
+    }
 
     try {
       const sale = await repository.executeSale({
@@ -661,7 +871,19 @@ export default function POSTerminalPage() {
       clearCart();
       await loadData();
     } catch (err: any) {
-      error('Khalad baa dhacay', err.message);
+      const errMsg = err?.message || String(err);
+      if (
+        errMsg.includes('Failed to fetch') || 
+        errMsg.includes('NetworkError') || 
+        errMsg.includes('network') ||
+        errMsg.includes('timeout') ||
+        errMsg.includes('offline')
+      ) {
+        console.warn('Network issue during checkout, saving locally offline:', errMsg);
+        await executeOfflineSale();
+      } else {
+        error('Khalad baa dhacay', errMsg);
+      }
     }
   };
 
@@ -1628,7 +1850,17 @@ export default function POSTerminalPage() {
         isOpen={isBarcodeOpen}
         onClose={() => setIsBarcodeOpen(false)}
         onScan={async (code) => {
-          const match = await repository.findVariantByBarcode(code);
+          let match: ProductVariant | null = null;
+          try {
+            if (typeof navigator !== 'undefined' && navigator.onLine) {
+              match = await repository.findVariantByBarcode(code);
+            }
+          } catch {
+            // fallback to offline cache
+          }
+          if (!match) {
+            match = await getCachedProductByBarcode(code);
+          }
           if (match) {
             addToCart(match, 1);
             setIsBarcodeOpen(false);
