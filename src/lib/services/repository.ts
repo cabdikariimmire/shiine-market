@@ -1447,7 +1447,7 @@ class ShopRepository {
     varCreated = this.formatVariantWithFractions(varCreated, fractionsMap, pricingMap, modelsMap);
 
     // If amount_based with initial stock, create initial batch record
-    if (managementMode === 'amount_based' && initialStock > 0) {
+    if ((managementMode === 'amount_based' || purchaseUnit.toLowerCase() === 'jawan') && initialStock > 0) {
       const containerCount = variantData.initial_containers || Number((initialStock / conversionFactor).toFixed(2));
       const totalBatchCost = variantData.batch_cost !== undefined && Number(variantData.batch_cost) > 0
         ? Number(variantData.batch_cost)
@@ -1464,6 +1464,7 @@ class ShopRepository {
         remaining_quantity: initialStock,
         total_purchase_cost: totalBatchCost,
         cost_per_liter: costPerLiter,
+        cost_per_unit: costPerLiter,
         cost_currency: '$',
         supplier_id: variantData.supplier_id || null,
         status: 'active',
@@ -1928,6 +1929,10 @@ class ShopRepository {
           // For cooking oil, always reuse the existing oil variant of this product to avoid duplicate variants
           matchedVar = existingVars.find((v: any) => v.management_mode === 'amount_based' || v.selling_unit === 'liter') || existingVars[0];
         }
+        if (!matchedVar && (purchaseUnit.toLowerCase() === 'jawan' || sellingUnit.toLowerCase() === 'kg')) {
+          // For Jawan / Powder (Bariis, Bur, Sokor), reuse existing variant of this product to avoid duplicate variants
+          matchedVar = existingVars.find((v: any) => v.purchase_unit === 'jawan' || v.selling_unit === 'kg') || existingVars[0];
+        }
       }
 
       if (matchedVar) {
@@ -2001,10 +2006,10 @@ class ShopRepository {
           total_sellable_units: totalUnits,
         });
 
-        // If amount_based oil, create a separate batch record
-        if (mMode === 'amount_based') {
+        // If amount_based oil or Jawan, create a separate batch record
+        if (mMode === 'amount_based' || purchaseUnit.toLowerCase() === 'jawan') {
           const containers = Number(data.container_count || data.containerCount || data.initial_containers || data.quantity || 1);
-          const containerCapacity = Number(data.container_capacity_liters || data.containerCapacityLiters || conversionFactor || 20);
+          const containerCapacity = Number(data.container_capacity_liters || data.containerCapacityLiters || conversionFactor || (purchaseUnit.toLowerCase() === 'jawan' ? 50 : 20));
           const costPerL = addedQtyInSelling > 0 ? Number((batchTotalCost / addedQtyInSelling).toFixed(4)) : effectiveBuyPrice;
           const batchNumber = data.batch_reference || data.batchReference || `DUF-${Date.now().toString().slice(-4)}`;
 
@@ -2015,6 +2020,8 @@ class ShopRepository {
             container_count: containers,
             liters_per_container: containerCapacity,
             total_liters: addedQtyInSelling,
+            total_initial_quantity: addedQtyInSelling,
+            cost_per_unit: costPerL,
             remaining_quantity: addedQtyInSelling,
             total_purchase_cost: batchTotalCost,
             cost_per_liter: costPerL,

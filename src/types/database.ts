@@ -61,6 +61,24 @@ export interface OilSellingMeasure {
   is_active: boolean;
 }
 
+export interface JawanSellingMeasure {
+  id: string;
+  product_id?: string;
+  variant_id?: string;
+  name: string; // e.g. '1 KG', '½ KG', '¾ KG', '¼ KG', '5K', 'Tuman'
+  label: string; // for compatibility
+  code: string; // '1KG', 'HALF_KG', 'THREE_QUARTER_KG', 'QUARTER_KG', '5K', 'TUMAN', 'CUSTOM'
+  quantity_kg: number; // Exact physical quantity in KG (e.g. 1.0, 0.5, 0.75, 0.25)
+  display_price: number; // Product selling value (e.g. $0.60, $0.30, $0.45, $0.15, $0.10)
+  amount: number; // for compatibility
+  payment_price: number; // Selling value or payment price (e.g. $0.20 for 5K)
+  supports_cash_change?: boolean; // true for 5K Sokor, false for normal/Tuman
+  currency?: '$' | 'SOS' | string;
+  description: string; // Hierarchy / description
+  sort_order: number;
+  is_active: boolean;
+}
+
 export interface ProductBatch {
   id: string;
   shop_id?: string;
@@ -231,7 +249,7 @@ export interface ProductVariant {
   container_capacity?: number | null; // e.g. 20 (liters per caag)
   container_capacity_liters?: number | null; // e.g. 20
   initial_containers?: number | null; // e.g. 4 (initial containers count)
-  selling_options?: (AmountSellingOption | OilSellingMeasure)[] | null; // money or measure options for amount_based items
+  selling_options?: (AmountSellingOption | OilSellingMeasure | JawanSellingMeasure)[] | null; // money or measure options for amount_based/jawan items
   cost_per_unit?: number | null; // Exact calculated/persisted cost per selling unit (e.g. $0.43/pcs)
   total_purchase_cost?: number | null; // Total purchase cost for the batch/stock-in
   total_sellable_units?: number | null; // Total sellable units represented (e.g. 40 pcs)

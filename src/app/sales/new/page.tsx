@@ -30,7 +30,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
-import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogClose } from '@/components/ui/dialog';
+import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter, DialogClose } from '@/components/ui/dialog';
 import { BarcodeScannerModal } from '@/components/pos/barcode-modal';
 import { ReceiptModal } from '@/components/pos/receipt-modal';
 import { useToast } from '@/components/ui/toast';
@@ -46,7 +46,10 @@ import {
   isValidSellableQuantity,
   calculateOilChange,
   getDefaultOilSellingMeasures,
-  OilSellingMeasure
+  OilSellingMeasure,
+  calculateJawanChange,
+  getDefaultJawanSellingMeasures,
+  JawanSellingMeasure
 } from '@/lib/calculations/stock';
 import { AmountSellingOption, CartItem, Category, Customer, PaymentMethod, ProductVariant, Sale } from '@/types';
 import { 
@@ -100,6 +103,12 @@ export default function POSTerminalPage() {
   const [oilLiterQuantity, setOilLiterQuantity] = useState<string>('1');
   const [selectedOilMeasure, setSelectedOilMeasure] = useState<OilSellingMeasure | null>(null);
   const [oilPaymentAmount, setOilPaymentAmount] = useState<string>('');
+
+  // Jawan / Sack & Powder Selling Modal State
+  const [isJawanModalOpen, setIsJawanModalOpen] = useState(false);
+  const [selectedJawanVariant, setSelectedJawanVariant] = useState<ProductVariant | null>(null);
+  const [selectedJawanMeasure, setSelectedJawanMeasure] = useState<JawanSellingMeasure | null>(null);
+  const [jawanPaymentAmount, setJawanPaymentAmount] = useState<string>('');
 
   const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
 
@@ -402,11 +411,118 @@ export default function POSTerminalPage() {
     }
   };
 
+  // Helper to retrieve Jawan Selling Measures
+  const getVariantJawanMeasures = useCallback((variant: ProductVariant): JawanSellingMeasure[] => {
+    if (Array.isArray(variant.selling_options) && variant.selling_options.length > 0 && (variant.selling_options[0] as any)?.quantity_kg !== undefined) {
+      return variant.selling_options as JawanSellingMeasure[];
+    }
+    return getDefaultJawanSellingMeasures(variant.sell_price || 0.60);
+  }, []);
+
+  // Open Jawan / Sack Selling Modal
+  const openJawanModal = (variant: ProductVariant, initialMeasure?: JawanSellingMeasure) => {
+    if (variant.stock_quantity <= 0) {
+      error(`Lama iibin karo — "${variant.product?.name} (${variant.variant_name})" way dhammaatay (🔴 Out of Stock)!`);
+      return;
+    }
+    setSelectedJawanVariant(variant);
+    const measures = getVariantJawanMeasures(variant);
+    const targetMeasure = initialMeasure || measures[0] || null;
+    setSelectedJawanMeasure(targetMeasure);
+    if (targetMeasure && targetMeasure.supports_cash_change) {
+      setJawanPaymentAmount(String(targetMeasure.amount || targetMeasure.payment_price || 0.20));
+    } else {
+      setJawanPaymentAmount('');
+    }
+    setIsJawanModalOpen(true);
+  };
+
+  // Add Jawan Measure to Cart (Exact KG, Exact Cost, Configured Cash/Change)
+  const handleAddJawanMeasureToCart = (measureParam?: JawanSellingMeasure) => {
+    if (!selectedJawanVariant) return;
+    const measure = measureParam || selectedJawanMeasure;
+    if (!measure) {
+      error('Fadlan dooro cabbirka aad iibinayso');
+      return;
+    }
+
+    const availableStock = selectedJawanVariant.stock_quantity;
+    const currentUsageOthers = cart
+      .filter(i => i.variant.id === selectedJawanVariant.id)
+      .reduce((sum, i) => sum + (i.actual_quantity_used ?? i.quantity), 0);
+    const remainingStock = Number((availableStock - currentUsageOthers).toFixed(4));
+
+    if (measure.quantity_kg > remainingStock) {
+      error(`Stock-gu kuma filna! Waxaa haray kaliya ${remainingStock} KG, laakiin cabbirkani wuxuu u baahan yahay ${measure.quantity_kg} KG.`);
+      return;
+    }
+
+    const costPerKg = selectedJawanVariant.cost_per_unit || calculateCostPerBaseUnit(selectedJawanVariant.buy_price, selectedJawanVariant.conversion_factor, selectedJawanVariant);
+    const sellingValue = measure.payment_price || measure.display_price || (measure.quantity_kg * selectedJawanVariant.sell_price);
+    const exactCost = Number((measure.quantity_kg * costPerKg).toFixed(4));
+    const grossProfit = Number((sellingValue - exactCost).toFixed(4));
+
+    let customerPayment: number | undefined = undefined;
+    let changeAmount: number | undefined = undefined;
+
+    if (measure.supports_cash_change) {
+      const paidVal = parseFloat(jawanPaymentAmount);
+      const effectivePayment = !isNaN(paidVal) && paidVal > 0 ? paidVal : (measure.amount || sellingValue);
+
+      if (effectivePayment < sellingValue - 0.0001) {
+        error(`Lacagta macmiilku bixiyay ($${effectivePayment.toFixed(2)}) way ka yar tahay qiimaha alaabta ($${sellingValue.toFixed(2)})!`);
+        return;
+      }
+
+      const changeCalc = calculateJawanChange(effectivePayment, sellingValue);
+      customerPayment = effectivePayment;
+      changeAmount = changeCalc.changeUsd;
+    }
+
+    const cartItemId = `${selectedJawanVariant.id}_jawan_${measure.code || measure.id}_${Date.now()}`;
+
+    setCart(prev => [
+      ...prev,
+      {
+        cartItemId,
+        product: selectedJawanVariant.product || { id: selectedJawanVariant.product_id, name: 'Bariis/Fufur', created_at: '', updated_at: '' },
+        variant: selectedJawanVariant,
+        quantity: measure.quantity_kg,
+        quantityInput: String(measure.quantity_kg),
+        actual_quantity_used: measure.quantity_kg,
+        selling_method: 'measure',
+        selling_option_label: `${measure.name} (${measure.quantity_kg} KG)`,
+        selling_option_id: measure.id,
+        customer_payment: customerPayment,
+        change_amount: changeAmount,
+        unitPrice: selectedJawanVariant.sell_price,
+        unitCost: costPerKg,
+        pricing_mode: 'fixed',
+        discount: 0,
+        totalPrice: Number(sellingValue.toFixed(2)),
+        grossProfit: Number(grossProfit.toFixed(2)),
+      }
+    ]);
+
+    setIsJawanModalOpen(false);
+    const changeMsg = changeAmount && changeAmount > 0 
+      ? ` (Celis: $${changeAmount.toFixed(2)} / ${formatSos(changeAmount * 20000)} SOS)` 
+      : '';
+    success(`Ku daray dambiisha: ${selectedJawanVariant.product?.name} [${measure.name}] - $${sellingValue.toFixed(2)}${changeMsg}`);
+  };
+
   // Add Variant to Cart with Fractional & Pack Validation
   const addToCart = (variant: ProductVariant, customAddQty?: number) => {
     // If amount_based oil, open dedicated oil selling flow
     if (variant.management_mode === 'amount_based') {
       openOilModal(variant);
+      return;
+    }
+
+    // If Jawan / Sack product and added directly without specific quantity, open Jawan measure flow
+    const isJawan = variant.purchase_unit === 'jawan' || (variant.selling_unit?.toLowerCase() === 'kg' && Array.isArray(variant.selling_options) && variant.selling_options.length > 0 && (variant.selling_options[0] as any)?.quantity_kg !== undefined);
+    if (isJawan && customAddQty === undefined) {
+      openJawanModal(variant);
       return;
     }
 
@@ -423,10 +539,10 @@ export default function POSTerminalPage() {
       return;
     }
 
-    // Default quantity when adding is 1 (or step for bulk fractional)
+    // Default quantity when adding is step if step < 1 (e.g. 0.5 Bac for Basto), else 1
     const defaultAdd = customAddQty !== undefined 
       ? customAddQty 
-      : (variant.stock_quantity < 1 ? step : 1);
+      : (variant.stock_quantity < 1 ? step : (step < 1 ? step : 1));
 
     const existingIndex = cart.findIndex(item => item.variant.id === variant.id && !item.actual_quantity_used);
     const existingQty = existingIndex !== -1 ? cart[existingIndex].quantity : 0;
@@ -964,6 +1080,7 @@ export default function POSTerminalPage() {
                 const minSellable = getVariantStep(v);
                 const isPack = v.management_mode === 'pack_based';
                 const isOil = v.management_mode === 'amount_based';
+                const isJawan = v.purchase_unit === 'jawan' || (v.selling_unit?.toLowerCase() === 'kg' && Array.isArray(v.selling_options) && v.selling_options.length > 0 && (v.selling_options[0] as any)?.quantity_kg !== undefined);
                 const packGrams = (v.source_quantity && v.pack_count && v.pack_count > 0)
                   ? Math.round(v.source_quantity / v.pack_count)
                   : 50;
@@ -976,9 +1093,11 @@ export default function POSTerminalPage() {
                         ? 'border-red-200 dark:border-red-950/60 bg-slate-50/80 dark:bg-slate-900/60 opacity-60'
                         : isOil 
                           ? 'border-amber-200/90 dark:border-amber-900/60 bg-white dark:bg-slate-900 hover:border-amber-500 hover:shadow-md'
-                          : isPack
-                            ? 'border-blue-200/90 dark:border-blue-900/60 bg-white dark:bg-slate-900 hover:border-blue-500 hover:shadow-md'
-                            : 'border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-emerald-500 hover:shadow-md'
+                          : isJawan
+                            ? 'border-amber-200/90 dark:border-amber-900/60 bg-white dark:bg-slate-900 hover:border-amber-500 hover:shadow-md'
+                            : isPack
+                              ? 'border-blue-200/90 dark:border-blue-900/60 bg-white dark:bg-slate-900 hover:border-blue-500 hover:shadow-md'
+                              : 'border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-emerald-500 hover:shadow-md'
                     }`}
                   >
                     <button
@@ -990,6 +1109,8 @@ export default function POSTerminalPage() {
                         }
                         if (isOil) {
                           openOilModal(v);
+                        } else if (isJawan) {
+                          openJawanModal(v);
                         } else {
                           addToCart(v);
                         }
@@ -1005,11 +1126,13 @@ export default function POSTerminalPage() {
                             ? 'text-red-700 dark:text-red-300 bg-red-100 dark:bg-red-950/80 border border-red-200 dark:border-red-800'
                             : isOil
                               ? 'text-amber-800 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/70 border border-amber-300 dark:border-amber-800'
-                              : isPack
-                                ? 'text-blue-800 dark:text-blue-300 bg-blue-100 dark:bg-blue-950/70 border border-blue-300 dark:border-blue-800'
-                                : 'text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/60'
+                              : isJawan
+                                ? 'text-amber-800 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/70 border border-amber-300 dark:border-amber-800'
+                                : isPack
+                                  ? 'text-blue-800 dark:text-blue-300 bg-blue-100 dark:bg-blue-950/70 border border-blue-300 dark:border-blue-800'
+                                  : 'text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/60'
                         }`}>
-                          {isOutOfStock ? '🔴 Out of Stock' : isOil ? '💧 Saliid' : isPack ? '📦 Baakad' : v.variant_name}
+                          {isOutOfStock ? '🔴 Out of Stock' : isOil ? '💧 Saliid' : isJawan ? '🌾 Jawan' : isPack ? '📦 Baakad' : v.variant_name}
                         </span>
                       </div>
 
@@ -1036,7 +1159,13 @@ export default function POSTerminalPage() {
                         </p>
                       )}
 
-                      {!isPack && !isOil && v.unit_division && v.unit_division > 1 && (
+                      {isJawan && (
+                        <p className="text-[10px] text-amber-600 dark:text-amber-400 font-semibold mt-0.5">
+                          Cabbirrada: 1 KG, ½ KG, ¾ KG, ¼ KG
+                        </p>
+                      )}
+
+                      {!isPack && !isOil && !isJawan && v.unit_division && v.unit_division > 1 && (
                         <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-mono font-semibold mt-0.5">
                           Min: {minSellable} {v.selling_unit}
                         </p>
@@ -1046,6 +1175,10 @@ export default function POSTerminalPage() {
                         {isOil ? (
                           <span className="text-xs font-black text-amber-700 dark:text-amber-400">
                             💧 Dooro Qiimaha
+                          </span>
+                        ) : isJawan ? (
+                          <span className="text-xs font-black text-amber-700 dark:text-amber-400">
+                            🌾 Dooro Cabbirka
                           </span>
                         ) : v.pricing_mode === 'denomination' && v.sos_price ? (
                           <div>
@@ -1071,6 +1204,10 @@ export default function POSTerminalPage() {
                           <span className="text-[10px] font-bold text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/80 px-1.5 py-0.5 rounded">
                             Amount POS
                           </span>
+                        ) : isJawan ? (
+                          <span className="text-[10px] font-bold text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/80 px-1.5 py-0.5 rounded">
+                            Jawan POS
+                          </span>
                         ) : v.pricing_mode === 'denomination' ? (
                           <span className="text-[10px] font-bold text-purple-700 dark:text-purple-300 bg-purple-100 dark:bg-purple-950/80 px-1.5 py-0.5 rounded">
                             Mode A
@@ -1083,10 +1220,10 @@ export default function POSTerminalPage() {
                       </div>
                     </button>
 
-                    {/* Quick Add Buttons for Pack-based Powder (1 Bac, 2 Bac, 3 Bac, 5 Bac) */}
+                    {/* Quick Add Buttons for Pack-based (Fractional support: 0.5 Bac, 1 Bac, 2 Bac, 5 Bac) */}
                     {isPack && !isOutOfStock && (
                       <div className="grid grid-cols-4 gap-1 mt-2 pt-2 border-t border-blue-100 dark:border-blue-900/40">
-                        {[1, 2, 3, 5].map((bagQty) => (
+                        {(minSellable < 1 ? [minSellable, 1, 2, 5] : [1, 2, 3, 5]).map((bagQty) => (
                           <button
                             key={bagQty}
                             type="button"
@@ -1098,6 +1235,66 @@ export default function POSTerminalPage() {
                             title={`Ku dar ${bagQty} Bac`}
                           >
                             +{bagQty} Bac
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Quick Add Buttons for Jawan / Sack Products (1 KG, ½ KG, ¾ KG, ¼ KG) */}
+                    {isJawan && !isOutOfStock && (
+                      <div className="grid grid-cols-4 gap-1 mt-2 pt-2 border-t border-amber-100 dark:border-amber-900/40">
+                        {getVariantJawanMeasures(v).slice(0, 4).map((jm) => (
+                          <button
+                            key={jm.code || jm.id}
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (jm.supports_cash_change) {
+                                openJawanModal(v, jm);
+                              } else {
+                                setSelectedJawanVariant(v);
+                                const availableStock = v.stock_quantity;
+                                const currentUsageOthers = cart
+                                  .filter(i => i.variant.id === v.id)
+                                  .reduce((sum, i) => sum + (i.actual_quantity_used ?? i.quantity), 0);
+                                const remainingStock = Number((availableStock - currentUsageOthers).toFixed(4));
+                                if (jm.quantity_kg > remainingStock) {
+                                  error(`Stock-gu kuma filna! Waxaa haray kaliya ${remainingStock} KG.`);
+                                  return;
+                                }
+                                const costPerKg = v.cost_per_unit || calculateCostPerBaseUnit(v.buy_price, v.conversion_factor, v);
+                                const sellingValue = jm.payment_price || jm.display_price || (jm.quantity_kg * v.sell_price);
+                                const exactCost = Number((jm.quantity_kg * costPerKg).toFixed(4));
+                                const grossProfit = Number((sellingValue - exactCost).toFixed(4));
+                                const cartItemId = `${v.id}_jawan_${jm.code || jm.id}_${Date.now()}`;
+                                setCart(prev => [
+                                  ...prev,
+                                  {
+                                    cartItemId,
+                                    product: v.product || { id: v.product_id, name: 'Bariis/Fufur', created_at: '', updated_at: '' },
+                                    variant: v,
+                                    quantity: jm.quantity_kg,
+                                    quantityInput: String(jm.quantity_kg),
+                                    actual_quantity_used: jm.quantity_kg,
+                                    selling_method: 'measure',
+                                    selling_option_label: `${jm.name} (${jm.quantity_kg} KG)`,
+                                    selling_option_id: jm.id,
+                                    unitPrice: v.sell_price,
+                                    unitCost: costPerKg,
+                                    pricing_mode: 'fixed',
+                                    discount: 0,
+                                    totalPrice: Number(sellingValue.toFixed(2)),
+                                    grossProfit: Number(grossProfit.toFixed(2)),
+                                  }
+                                ]);
+                                success(`Ku daray: ${v.product?.name} [${jm.name}] - $${sellingValue.toFixed(2)}`);
+                              }
+                            }}
+                            className="py-1 px-1 bg-amber-50 dark:bg-amber-950/60 hover:bg-amber-600 hover:text-white text-amber-800 dark:text-amber-300 rounded text-[10px] font-bold border border-amber-200 dark:border-amber-800 transition-colors text-center"
+                            title={`${jm.name} - $${(jm.payment_price || jm.display_price).toFixed(2)}`}
+                          >
+                            <span className="block truncate">{jm.name}</span>
+                            <span className="block text-[9px] opacity-80">${(jm.payment_price || jm.display_price).toFixed(2)}</span>
                           </button>
                         ))}
                       </div>
@@ -1140,9 +1337,10 @@ export default function POSTerminalPage() {
             ) : (
               cart.map((item) => {
                 const itemKey = getItemKey(item);
-                const isOil = item.variant?.management_mode === 'amount_based' || item.actual_quantity_used !== undefined;
+                const isOil = item.variant?.management_mode === 'amount_based' || item.selling_method === 'liter' || (item.selling_method === 'measure' && (item.variant?.purchase_unit === 'caag' || item.variant?.selling_unit?.toLowerCase() === 'liter'));
+                const isJawan = item.variant?.purchase_unit === 'jawan' || item.variant?.selling_unit?.toLowerCase() === 'kg';
                 const isPack = item.variant?.management_mode === 'pack_based';
-                const step = isPack ? 1 : getVariantStep(item.variant);
+                const step = getVariantStep(item.variant);
 
                 return (
                   <div
@@ -1154,7 +1352,7 @@ export default function POSTerminalPage() {
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <p className="font-bold text-slate-900 dark:text-white text-xs">
                             {item.product.name}{' '}
-                            <span className={isOil ? "text-amber-600 font-semibold" : "text-emerald-600 font-semibold"}>
+                            <span className={isOil || isJawan ? "text-amber-600 font-semibold" : "text-emerald-600 font-semibold"}>
                               ({item.selling_option_label || item.variant.variant_name})
                             </span>
                           </p>
@@ -1162,6 +1360,10 @@ export default function POSTerminalPage() {
                           {isOil ? (
                             <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
                               💧 Saliid: {item.selling_option_label || 'Amount Option'}
+                            </span>
+                          ) : isJawan && item.selling_option_label ? (
+                            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                              🌾 Jawan: {item.selling_option_label}
                             </span>
                           ) : isPack ? (
                             <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300">
@@ -1182,6 +1384,15 @@ export default function POSTerminalPage() {
                           {isOil ? (
                             <>
                               Qiyaasta: <strong className="text-slate-800 dark:text-slate-200 font-bold">{item.actual_quantity_used} L</strong> | Qiimaha: {item.selling_option_label}
+                              {item.change_amount !== undefined && item.change_amount > 0 && (
+                                <span className="text-emerald-700 dark:text-emerald-400 font-bold ml-1">
+                                  | Bixiyay: ${item.customer_payment?.toFixed(2)} (Celis: ${item.change_amount.toFixed(2)} / {formatSos(item.change_amount * 20000)} SOS)
+                                </span>
+                              )}
+                            </>
+                          ) : isJawan && item.selling_option_label ? (
+                            <>
+                              Cabbirka: <strong className="text-slate-800 dark:text-slate-200 font-bold">{item.quantity} KG</strong> | Qiimaha: {item.selling_option_label}
                               {item.change_amount !== undefined && item.change_amount > 0 && (
                                 <span className="text-emerald-700 dark:text-emerald-400 font-bold ml-1">
                                   | Bixiyay: ${item.customer_payment?.toFixed(2)} (Celis: ${item.change_amount.toFixed(2)} / {formatSos(item.change_amount * 20000)} SOS)
@@ -1283,19 +1494,27 @@ export default function POSTerminalPage() {
                               </button>
                               <button
                                 type="button"
-                                onClick={() => handleAddQuickQty(item, Number((step * 2).toFixed(4)))}
-                                className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600"
-                                title={`Ku dar ${Number((step * 2).toFixed(4))} ${item.variant.selling_unit}`}
-                              >
-                                +{Number((step * 2).toFixed(4))}
-                              </button>
-                              <button
-                                type="button"
                                 onClick={() => handleAddQuickQty(item, 1)}
                                 className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600"
                                 title={`Ku dar 1 ${item.variant.selling_unit}`}
                               >
                                 +1
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleAddQuickQty(item, 2)}
+                                className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600"
+                                title={`Ku dar 2 ${item.variant.selling_unit}`}
+                              >
+                                +2
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleAddQuickQty(item, 5)}
+                                className="h-7 px-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600"
+                                title={`Ku dar 5 ${item.variant.selling_unit}`}
+                              >
+                                +5
                               </button>
                             </>
                           ) : (
@@ -1487,7 +1706,7 @@ export default function POSTerminalPage() {
       {/* ======================================================== */}
       {/* OIL / DUAL-MODE SELLING MODAL (LITER & MONEY AMOUNT)      */}
       {/* ======================================================== */}
-      <Dialog open={isOilModalOpen} onOpenChange={setIsOilModalOpen}>
+      <Dialog open={isOilModalOpen} onOpenChange={setIsOilModalOpen} maxWidth="max-w-xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 font-black text-slate-900 dark:text-white text-base">
             <Droplet className="h-5 w-5 text-amber-600" />
@@ -1499,7 +1718,7 @@ export default function POSTerminalPage() {
         </DialogHeader>
 
         {selectedOilVariant && (
-          <div className="space-y-4 py-2 text-xs">
+          <DialogBody className="space-y-4 py-2 text-xs">
             {/* Product & Stock Status Card */}
             <div className="p-3 bg-amber-50/80 dark:bg-amber-950/30 rounded-xl border border-amber-200 dark:border-amber-900 flex items-center justify-between">
               <div>
@@ -1789,7 +2008,7 @@ export default function POSTerminalPage() {
                 )}
               </div>
             )}
-          </div>
+          </DialogBody>
         )}
 
         <DialogFooter className="flex gap-2">
@@ -1809,6 +2028,246 @@ export default function POSTerminalPage() {
             {oilSellingMethod === 'liter'
               ? `Ku dar Dambiisha (${parsedLiterQty} L - ${formatMoney(parsedLiterQty * (selectedOilVariant?.sell_price || 1.85))})`
               : `Ku dar Dambiisha (${activeOilMeasure?.name || 'Cabbir'} - ${formatMoney(activeOilMeasure?.payment_price || 0)})`}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* JAWAN / SACK & POWDER SELLING MODAL */}
+      <Dialog open={isJawanModalOpen} onOpenChange={setIsJawanModalOpen} maxWidth="max-w-xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 font-black text-amber-700 dark:text-amber-400">
+            <Package className="h-5 w-5" />
+            Iibka Jawan / Sack & Powder POS ({selectedJawanVariant?.product?.name || 'Bariis/Fufur'})
+          </DialogTitle>
+          <DialogDescription>
+            Dooro cabbirka la doonayo (1 KG, ½ KG, ¾ KG, ¼ KG, 5K, Tuman)
+          </DialogDescription>
+        </DialogHeader>
+
+        {selectedJawanVariant && (() => {
+          const measures = getVariantJawanMeasures(selectedJawanVariant);
+          const currentMeasure = selectedJawanMeasure || measures[0] || null;
+          const availableStock = selectedJawanVariant.stock_quantity;
+          const currentUsageOthers = cart
+            .filter(i => i.variant.id === selectedJawanVariant.id)
+            .reduce((sum, i) => sum + (i.actual_quantity_used ?? i.quantity), 0);
+          const remainingStock = Number((availableStock - currentUsageOthers).toFixed(4));
+          const measureSellingPrice = currentMeasure 
+            ? (currentMeasure.payment_price || currentMeasure.display_price || (currentMeasure.quantity_kg * selectedJawanVariant.sell_price))
+            : 0;
+          const paidVal = parseFloat(jawanPaymentAmount);
+          const effectivePaid = !isNaN(paidVal) && paidVal > 0 ? paidVal : (currentMeasure?.amount || measureSellingPrice);
+          const changeCalc = calculateJawanChange(effectivePaid, measureSellingPrice);
+          const isUnderpaid = currentMeasure?.supports_cash_change ? (effectivePaid < measureSellingPrice - 0.0001) : false;
+          const isStockShort = currentMeasure ? currentMeasure.quantity_kg > remainingStock : false;
+
+          return (
+            <DialogBody className="space-y-4 py-2 text-xs">
+              {/* Product & Stock Status Card */}
+              <div className="p-3 bg-amber-50/80 dark:bg-amber-950/30 rounded-xl border border-amber-200 dark:border-amber-900 flex items-center justify-between">
+                <div>
+                  <p className="font-black text-slate-900 dark:text-white text-sm">
+                    {selectedJawanVariant.product?.name} ({selectedJawanVariant.variant_name})
+                  </p>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Qiimaha 1 KG: <strong className="text-emerald-700 dark:text-emerald-300 font-mono font-bold">${selectedJawanVariant.sell_price.toFixed(2)} / KG</strong>
+                  </p>
+                </div>
+                <div className="text-right">
+                  <span className="text-[10px] text-slate-400 block">Kaydka Haray:</span>
+                  <span className={`text-sm font-black font-mono ${remainingStock <= 5 ? 'text-red-600' : 'text-amber-700 dark:text-amber-300'}`}>
+                    {remainingStock} KG
+                  </span>
+                </div>
+              </div>
+
+              {/* Selling Measures Cards */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="font-bold text-slate-800 dark:text-slate-200 text-xs">
+                    Dooro Cabbirka:
+                  </label>
+                  <span className="text-[11px] text-slate-400 font-mono">
+                    {measures.length} Cabbir oo Diyaarsan
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {measures.map((measure) => {
+                    const isSelected = (currentMeasure?.code === measure.code) || (currentMeasure?.id === measure.id);
+                    const price = measure.payment_price || measure.display_price || (measure.quantity_kg * selectedJawanVariant.sell_price);
+
+                    return (
+                      <button
+                        key={measure.code || measure.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedJawanMeasure(measure);
+                          if (measure.supports_cash_change) {
+                            setJawanPaymentAmount(String(measure.amount || price));
+                          } else {
+                            setJawanPaymentAmount('');
+                          }
+                        }}
+                        className={`p-2.5 rounded-xl border text-left transition-all flex flex-col justify-between ${
+                          isSelected
+                            ? 'border-amber-600 bg-amber-500 text-white shadow-xs font-black'
+                            : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-amber-400 text-slate-800 dark:text-slate-200'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between w-full">
+                          <span className="text-xs font-black">{measure.name}</span>
+                          <span className={`text-xs font-mono font-bold ${isSelected ? 'text-amber-100' : 'text-emerald-700 dark:text-emerald-400'}`}>
+                            ${price.toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="mt-1 flex items-center justify-between w-full text-[10px] font-mono">
+                          <span className={isSelected ? 'text-amber-100' : 'text-slate-500 dark:text-slate-400'}>
+                            {measure.quantity_kg} KG
+                          </span>
+                          {measure.supports_cash_change && (
+                            <span className={`px-1 rounded text-[8px] font-bold ${isSelected ? 'bg-amber-700 text-amber-100' : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'}`}>
+                              Cash/Change
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* If measure supports cash change (e.g. 5K Sokor: pay $0.20 -> $0.15 value, $0.05 change) */}
+              {currentMeasure?.supports_cash_change ? (
+                <div className="space-y-2.5 pt-1">
+                  <div className="p-3 bg-slate-50 dark:bg-slate-800/40 rounded-xl border border-slate-200 dark:border-slate-700 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="font-bold text-slate-800 dark:text-slate-200 text-xs">
+                        Lacagta Macmiilku Bixiyay ($ / USD):
+                      </label>
+                      <span className="text-[11px] font-mono text-slate-500">
+                        Qiimaha Alaabta: <strong className="text-slate-900 dark:text-white">${measureSellingPrice.toFixed(2)}</strong>
+                      </span>
+                    </div>
+
+                    <div className="relative">
+                      <span className="absolute left-3 top-2.5 text-sm font-bold text-slate-400">$</span>
+                      <Input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        placeholder={(currentMeasure.amount || 0.20).toFixed(2)}
+                        value={jawanPaymentAmount}
+                        onChange={(e) => setJawanPaymentAmount(e.target.value)}
+                        className="pl-7 h-10 font-mono font-black text-sm bg-white dark:bg-slate-900"
+                      />
+                    </div>
+
+                    {/* Quick Payment Chips */}
+                    <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                      <span className="text-[10px] text-slate-400 font-bold mr-1">Dhaqso:</span>
+                      {[
+                        { label: `$0.20 (5K)`, val: 0.20 },
+                        { label: '$0.25', val: 0.25 },
+                        { label: '$0.50', val: 0.50 },
+                        { label: '$1.00', val: 1.00 },
+                      ].map(chip => (
+                        <button
+                          key={chip.label}
+                          type="button"
+                          onClick={() => setJawanPaymentAmount(chip.val.toFixed(2))}
+                          className="px-2.5 py-1 rounded-md text-[11px] font-mono font-bold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-amber-400 hover:bg-amber-50/50"
+                        >
+                          {chip.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Live Breakdown */}
+                  <div className="p-3 bg-amber-50/70 dark:bg-amber-950/30 rounded-xl border border-amber-200 dark:border-amber-800 space-y-2">
+                    <div className="grid grid-cols-3 gap-2 text-center">
+                      <div className="p-2 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800">
+                        <span className="text-[10px] text-slate-400 block font-medium">Qiimaha Alaabta</span>
+                        <span className="text-xs font-black font-mono text-slate-900 dark:text-white">
+                          ${measureSellingPrice.toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="p-2 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800">
+                        <span className="text-[10px] text-slate-400 block font-medium">Lacagta La Bixiyay</span>
+                        <span className="text-xs font-black font-mono text-slate-900 dark:text-white">
+                          ${effectivePaid.toFixed(2)}
+                        </span>
+                      </div>
+                      <div className={`p-2 rounded-lg border ${
+                        changeCalc.changeUsd > 0 
+                          ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-300 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200' 
+                          : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-600'
+                      }`}>
+                        <span className="text-[10px] text-slate-400 block font-medium">Celis (Cash)</span>
+                        <span className="text-xs font-black font-mono">
+                          ${changeCalc.changeUsd.toFixed(2)}
+                        </span>
+                      </div>
+                    </div>
+
+                    {changeCalc.changeUsd > 0 && (
+                      <div className="p-2 bg-emerald-100/80 dark:bg-emerald-950/60 rounded-lg border border-emerald-300 dark:border-emerald-800 flex items-center justify-between text-xs text-emerald-900 dark:text-emerald-200 font-bold">
+                        <span>U Celi Macmiilka (Change):</span>
+                        <span className="font-mono font-black text-sm">
+                          ${changeCalc.changeUsd.toFixed(2)} = {formatSos(changeCalc.changeSos)} SOS
+                        </span>
+                      </div>
+                    )}
+
+                    {isUnderpaid && (
+                      <div className="p-2 bg-red-100 dark:bg-red-950/60 border border-red-300 dark:border-red-800 rounded-lg flex items-center gap-2 text-red-700 dark:text-red-300 text-[11px] font-bold">
+                        <AlertTriangle className="h-4 w-4 shrink-0" />
+                        <span>Lacagta la bixiyay way ka yar tahay qiimaha alaabta!</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                /* Standard Measure Confirmation */
+                <div className="p-3 bg-slate-50 dark:bg-slate-800/40 rounded-xl border border-slate-200 dark:border-slate-700 flex items-center justify-between">
+                  <div>
+                    <span className="text-slate-500 block text-[11px]">Cabbirka La Doortay:</span>
+                    <strong className="text-slate-900 dark:text-white font-black text-sm">
+                      {currentMeasure?.name} ({currentMeasure?.quantity_kg} KG)
+                    </strong>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-slate-500 block text-[11px]">Wadarta Qiimaha:</span>
+                    <strong className="text-emerald-700 dark:text-emerald-300 font-black text-base font-mono">
+                      ${measureSellingPrice.toFixed(2)}
+                    </strong>
+                  </div>
+                </div>
+              )}
+
+              {isStockShort && (
+                <div className="p-2 bg-red-100 dark:bg-red-950/60 border border-red-300 dark:border-red-800 rounded-lg flex items-center gap-2 text-red-700 dark:text-red-300 text-[11px] font-bold">
+                  <AlertTriangle className="h-4 w-4 shrink-0" />
+                  <span>
+                    Stock-gu kuma filna! Waxaa haray kaliya {remainingStock} KG, laakiin cabbirkani wuxuu u baahan yahay {currentMeasure?.quantity_kg} KG.
+                  </span>
+                </div>
+              )}
+            </DialogBody>
+          );
+        })()}
+
+        <DialogFooter className="flex gap-2">
+          <Button variant="outline" onClick={() => setIsJawanModalOpen(false)}>
+            Ka noqo
+          </Button>
+          <Button
+            onClick={() => handleAddJawanMeasureToCart()}
+            disabled={!selectedJawanVariant}
+            className="bg-emerald-600 hover:bg-emerald-700 text-white font-black"
+          >
+            Ku dar Dambiisha
           </Button>
         </DialogFooter>
       </Dialog>

@@ -759,4 +759,210 @@ export function calculateCookingOilRegistration(params: {
   };
 }
 
+export interface JawanSellingMeasure {
+  id: string;
+  product_id?: string;
+  variant_id?: string;
+  name: string; // e.g. '1 KG', '½ KG', '¾ KG', '¼ KG', '5K', 'Tuman'
+  label: string; // for compatibility
+  code: string; // '1KG', 'HALF_KG', 'THREE_QUARTER_KG', 'QUARTER_KG', '5K', 'TUMAN', 'CUSTOM'
+  quantity_kg: number; // Exact physical quantity in KG (e.g. 1.0, 0.5, 0.75, 0.25)
+  display_price: number; // Product selling value (e.g. $0.60, $0.30, $0.45, $0.15, $0.10)
+  amount: number; // for compatibility
+  payment_price: number; // Selling value or customer payment amount (e.g. $0.20 for 5K)
+  supports_cash_change?: boolean; // true for 5K Sokor, false for normal/Tuman
+  currency?: '$' | 'SOS' | string;
+  description: string; // Hierarchy / description
+  sort_order: number;
+  is_active: boolean;
+}
+
+/**
+ * Default Jawan/Sack and Powder selling measures with exact physical hierarchy:
+ * 1 KG = 2 × ½ KG
+ * ½ KG = 2 × ¼ KG
+ * ¾ KG = ½ KG + ¼ KG
+ *
+ * Prices based on base selling price per 1 KG:
+ * 1 KG = $0.60
+ * ½ KG = $0.30
+ * ¾ KG = $0.45
+ * ¼ KG = $0.15
+ */
+export function getDefaultJawanSellingMeasures(sellingPricePerKg: number = 0.60): JawanSellingMeasure[] {
+  const sellPerKg = Number(sellingPricePerKg) > 0 ? Number(sellingPricePerKg) : 0.60;
+  const halfPrice = cleanPrecision(Math.round((sellPerKg / 2) * 100) / 100);
+  const quarterPrice = cleanPrecision(Math.round((sellPerKg / 4) * 100) / 100);
+  const threeQuarterPrice = cleanPrecision(Math.round((halfPrice + quarterPrice) * 100) / 100);
+
+  return [
+    {
+      id: 'jawan-1kg',
+      name: '1 KG',
+      label: '1 KG',
+      code: '1KG',
+      quantity_kg: 1.0,
+      display_price: sellPerKg,
+      amount: sellPerKg,
+      payment_price: sellPerKg,
+      supports_cash_change: false,
+      currency: '$',
+      description: '1 KG = 2 × ½ KG',
+      sort_order: 1,
+      is_active: true,
+    },
+    {
+      id: 'jawan-half-kg',
+      name: '½ KG',
+      label: '½ KG',
+      code: 'HALF_KG',
+      quantity_kg: 0.5,
+      display_price: halfPrice > 0 ? halfPrice : 0.30,
+      amount: halfPrice > 0 ? halfPrice : 0.30,
+      payment_price: halfPrice > 0 ? halfPrice : 0.30,
+      supports_cash_change: false,
+      currency: '$',
+      description: '½ KG = 2 × ¼ KG',
+      sort_order: 2,
+      is_active: true,
+    },
+    {
+      id: 'jawan-three-quarter-kg',
+      name: '¾ KG',
+      label: '¾ KG',
+      code: 'THREE_QUARTER_KG',
+      quantity_kg: 0.75,
+      display_price: threeQuarterPrice > 0 ? threeQuarterPrice : 0.45,
+      amount: threeQuarterPrice > 0 ? threeQuarterPrice : 0.45,
+      payment_price: threeQuarterPrice > 0 ? threeQuarterPrice : 0.45,
+      supports_cash_change: false,
+      currency: '$',
+      description: '¾ KG = ½ KG + ¼ KG',
+      sort_order: 3,
+      is_active: true,
+    },
+    {
+      id: 'jawan-quarter-kg',
+      name: '¼ KG',
+      label: '¼ KG',
+      code: 'QUARTER_KG',
+      quantity_kg: 0.25,
+      display_price: quarterPrice > 0 ? quarterPrice : 0.15,
+      amount: quarterPrice > 0 ? quarterPrice : 0.15,
+      payment_price: quarterPrice > 0 ? quarterPrice : 0.15,
+      supports_cash_change: false,
+      currency: '$',
+      description: '¼ KG',
+      sort_order: 4,
+      is_active: true,
+    },
+  ];
+}
+
+/**
+ * Calculates customer cash/change for Jawan products where supports_cash_change = true (e.g. 5K Sokor).
+ * Always cleanly separates:
+ * 1. physical quantity
+ * 2. product selling value
+ * 3. amount paid
+ * 4. change = amount_paid - selling_value
+ */
+export function calculateJawanChange(
+  amountPaid: number,
+  sellingValue: number
+): {
+  change: number;
+  changeUsd: number;
+  changeSos: number;
+  hasChange: boolean;
+  isValidPayment: boolean;
+  errorMessage?: string;
+} {
+  const paid = cleanPrecision(Math.max(0, Number(amountPaid) || 0));
+  const value = cleanPrecision(Math.max(0, Number(sellingValue) || 0));
+  const diff = cleanPrecision(paid - value);
+
+  if (diff < -0.0001) {
+    return {
+      change: 0,
+      changeUsd: 0,
+      changeSos: 0,
+      hasChange: false,
+      isValidPayment: false,
+      errorMessage: 'Lacagta la bixiyay way ka yar tahay qiimaha cabbirka.',
+    };
+  }
+
+  const change = Math.max(0, diff);
+  const changeSos = Math.round(change * 20000); // $0.05 = 1,000 SOS
+
+  return {
+    change,
+    changeUsd: change,
+    changeSos,
+    hasChange: change > 0,
+    isValidPayment: true,
+  };
+}
+
+/**
+ * Dedicated Jawan / Sack and Powder (Fufur, Bariis, Bur, Sokor) product registration calculator.
+ * Shop owner enters only real-world values:
+ * 1. Number of Jawan (Tirada Jawan) e.g. 10
+ * 2. KG per Jawan (KG halkii Jawan) e.g. 50 KG
+ * 3. Purchase price per Jawan (Qiimaha hal Jawan) e.g. $25.80
+ * 4. Selling price per 1 KG (Qiimaha 1 KG) e.g. $0.60
+ *
+ * Automatically calculates derived values:
+ * Total stock = 10 × 50 KG = 500 KG
+ * Total purchase cost = 10 × $25.80 = $258.00
+ * Cost per KG = $258 ÷ 500 = $0.516/KG
+ * Profit per KG = $0.60 - $0.516 = $0.084/KG
+ */
+export function calculateJawanRegistration(params: {
+  jawanCount: number;
+  kgPerJawan: number;
+  purchasePricePerJawan: number;
+  sellingPricePerKg: number;
+  customMeasures?: JawanSellingMeasure[];
+}): {
+  jawanCount: number;
+  kgPerJawan: number;
+  purchasePricePerJawan: number;
+  sellingPricePerKg: number;
+  totalStockKg: number;
+  totalPurchaseCost: number;
+  costPerKg: number;
+  profitPerKg: number;
+  isLoss: boolean;
+  measures: JawanSellingMeasure[];
+} {
+  const jawanCount = Math.max(0, Number(params.jawanCount) || 0);
+  const kgPerJawan = Math.max(0, Number(params.kgPerJawan) || 0);
+  const buyPerJawan = Math.max(0, Number(params.purchasePricePerJawan) || 0);
+  const sellPerKg = Math.max(0, Number(params.sellingPricePerKg) || 0);
+
+  const totalStockKg = cleanPrecision(jawanCount * kgPerJawan);
+  const totalPurchaseCost = cleanPrecision(jawanCount * buyPerJawan);
+  const costPerKg = totalStockKg > 0 ? cleanPrecision(totalPurchaseCost / totalStockKg) : 0;
+  const profitPerKg = cleanPrecision(sellPerKg - costPerKg);
+  const isLoss = profitPerKg < 0;
+  const measures = params.customMeasures && params.customMeasures.length > 0
+    ? params.customMeasures
+    : getDefaultJawanSellingMeasures(sellPerKg);
+
+  return {
+    jawanCount,
+    kgPerJawan,
+    purchasePricePerJawan: buyPerJawan,
+    sellingPricePerKg: sellPerKg,
+    totalStockKg,
+    totalPurchaseCost,
+    costPerKg,
+    profitPerKg,
+    isLoss,
+    measures,
+  };
+}
+
 
