@@ -44,7 +44,10 @@ import {
   calculateMinSellableQty,
   calculatePackRatio,
   calculateBatchCostPerUnit,
-  calculateBatchVariance
+  calculateBatchVariance,
+  getVariantStep,
+  isValidSellableQuantity,
+  calculateProductModel
 } from '@/lib/calculations/stock';
 import { calculateSaleTotal, calculateBatchProfitLoss, cleanPrecision, roundToCents, calculateGrossProfit, calculateNetProfit } from '@/lib/calculations/financials';
 import { calculateSosDenomination } from '@/lib/calculations/denominations';
@@ -922,6 +925,9 @@ class ShopRepository {
       container_unit?: string;
       container_capacity_liters?: number;
       selling_options?: AmountSellingOption[];
+      cost_per_unit?: number;
+      total_purchase_cost?: number;
+      total_sellable_units?: number;
     }>;
   }> {
     try {
@@ -1006,6 +1012,9 @@ class ShopRepository {
     container_unit?: string;
     container_capacity_liters?: number;
     selling_options?: AmountSellingOption[];
+    cost_per_unit?: number;
+    total_purchase_cost?: number;
+    total_sellable_units?: number;
   }): Promise<void> {
     try {
       const { data: shop } = await supabase.from('shops').select('id, settings').limit(1).maybeSingle();
@@ -1071,6 +1080,28 @@ class ShopRepository {
       ? v.selling_options 
       : (Array.isArray(model?.selling_options) ? model.selling_options : undefined);
 
+    const cost_per_unit = (model?.cost_per_unit !== undefined && model?.cost_per_unit !== null && Number(model.cost_per_unit) > 0)
+      ? Number(model.cost_per_unit)
+      : (v.cost_per_unit !== undefined && v.cost_per_unit !== null && Number(v.cost_per_unit) > 0 ? Number(v.cost_per_unit) : undefined);
+    const total_purchase_cost = model?.total_purchase_cost !== undefined && model?.total_purchase_cost !== null
+      ? Number(model.total_purchase_cost)
+      : (v.total_purchase_cost !== undefined && v.total_purchase_cost !== null ? Number(v.total_purchase_cost) : undefined);
+    const total_sellable_units = model?.total_sellable_units !== undefined && model?.total_sellable_units !== null
+      ? Number(model.total_sellable_units)
+      : (v.total_sellable_units !== undefined && v.total_sellable_units !== null ? Number(v.total_sellable_units) : undefined);
+
+    const calculated_cost_per_unit = calculateCostPerBaseUnit(v.buy_price, v.conversion_factor, {
+      ...v,
+      management_mode,
+      source_quantity,
+      source_unit,
+      pack_count,
+      selling_pack_unit,
+      cost_per_unit,
+      total_purchase_cost,
+      total_sellable_units,
+    });
+
     return {
       ...v,
       unit_division,
@@ -1085,6 +1116,9 @@ class ShopRepository {
       container_unit,
       container_capacity_liters,
       selling_options,
+      cost_per_unit: calculated_cost_per_unit,
+      total_purchase_cost,
+      total_sellable_units,
       category: v.product?.category || v.category,
     };
   }
@@ -1138,8 +1172,8 @@ class ShopRepository {
       };
     }
 
-    const { fractionsMap, pricingMap } = await this.getVariantMaps();
-    let results = (data || []).map(v => this.formatVariantWithFractions(v, fractionsMap, pricingMap));
+    const { fractionsMap, pricingMap, modelsMap } = await this.getVariantMaps();
+    let results = (data || []).map(v => this.formatVariantWithFractions(v, fractionsMap, pricingMap, modelsMap));
 
     if (categoryId && categoryId !== 'all') {
       results = results.filter(v => v.product?.category_id === categoryId);
@@ -1169,10 +1203,10 @@ class ShopRepository {
       .maybeSingle();
 
     if (error || !data) return null;
-    const { fractionsMap, pricingMap } = await this.getVariantMaps();
+    const { fractionsMap, pricingMap, modelsMap } = await this.getVariantMaps();
     return {
       ...data,
-      variants: (data.variants || []).map((v: any) => this.formatVariantWithFractions(v, fractionsMap, pricingMap)),
+      variants: (data.variants || []).map((v: any) => this.formatVariantWithFractions(v, fractionsMap, pricingMap, modelsMap)),
     } as Product;
   }
 
@@ -1184,8 +1218,8 @@ class ShopRepository {
       .maybeSingle();
 
     if (error || !data) return null;
-    const { fractionsMap, pricingMap } = await this.getVariantMaps();
-    return this.formatVariantWithFractions(data, fractionsMap, pricingMap);
+    const { fractionsMap, pricingMap, modelsMap } = await this.getVariantMaps();
+    return this.formatVariantWithFractions(data, fractionsMap, pricingMap, modelsMap);
   }
 
   public async findVariantByBarcode(barcode: string): Promise<ProductVariant | null> {
@@ -1231,6 +1265,10 @@ class ShopRepository {
       selling_options?: AmountSellingOption[];
       initial_containers?: number;
       batch_cost?: number;
+      total_purchase_cost?: number;
+      total_sellable_units?: number;
+      cost_per_unit?: number;
+      purchase_quantity?: number;
       batch_reference?: string;
     },
     reason?: string
@@ -1272,8 +1310,15 @@ class ShopRepository {
     let initialStock = Number(variantData.stock_quantity) || 0;
 
     if (managementMode === 'pack_based') {
-      division = 1;
-      minSellable = 1;
+      const explicitDivision = Number(variantData.unit_division);
+      const explicitMin = Number(variantData.min_sellable_qty);
+      if (explicitDivision > 1 || explicitMin > 0) {
+        division = explicitDivision > 1 ? explicitDivision : (explicitMin > 0 ? Math.round(1 / explicitMin) : 1);
+        minSellable = explicitMin > 0 ? explicitMin : calculateMinSellableQty(division);
+      } else if (!variantData.unit_division && !variantData.min_sellable_qty) {
+        division = 1;
+        minSellable = 1;
+      }
       sellingUnit = variantData.selling_pack_unit || 'bac';
       purchaseUnit = variantData.source_unit || 'g';
       initialStock = Number(variantData.pack_count) || initialStock;
@@ -1376,6 +1421,14 @@ class ShopRepository {
     // Persist fractional division, pricing mode & model data directly to Supabase settings store
     await this.saveVariantFraction(variantId, division, minSellable);
     await this.saveVariantPricing(variantId, pricingMode, sosPrice || undefined);
+    const totalActualCost = Number((variantData as any).total_purchase_cost || variantData.batch_cost || ((variantData as any).purchase_quantity ? Number(variantData.buy_price || 0) * Number((variantData as any).purchase_quantity) : Number(variantData.buy_price || 0)));
+    const totalUnits = Number((variantData as any).total_sellable_units) || Number(variantData.pack_count) || (Number(variantData.source_quantity) && conversionFactor > 0 ? Number(variantData.source_quantity) * conversionFactor : initialStock);
+    const costPerSellingUnit = (variantData as any).cost_per_unit !== undefined && Number((variantData as any).cost_per_unit) > 0
+      ? cleanPrecision(Number((variantData as any).cost_per_unit))
+      : (totalUnits > 0 && totalActualCost > 0
+          ? cleanPrecision(totalActualCost / totalUnits)
+          : calculateCostPerBaseUnit(Number(variantData.buy_price) || 0, conversionFactor));
+
     await this.saveVariantModel(variantId, {
       management_mode: managementMode,
       source_quantity: variantData.source_quantity,
@@ -1385,6 +1438,9 @@ class ShopRepository {
       container_unit: variantData.container_unit,
       container_capacity_liters: variantData.container_capacity_liters,
       selling_options: variantData.selling_options,
+      cost_per_unit: costPerSellingUnit,
+      total_purchase_cost: totalActualCost,
+      total_sellable_units: totalUnits,
     });
 
     const { fractionsMap, pricingMap, modelsMap } = await this.getVariantMaps();
@@ -1508,8 +1564,10 @@ class ShopRepository {
     let conversionFactor = updates.conversion_factor !== undefined ? Number(updates.conversion_factor) : (updates.conversionFactor !== undefined ? Number(updates.conversionFactor) : Number(prev.conversion_factor || 1));
 
     if (managementMode === 'pack_based') {
-      division = 1;
-      minSellable = 1;
+      if (!updates.unit_division && !updates.unitDivision && !updates.min_sellable_qty && !updates.minSellableQty && !prev.unit_division && !prev.min_sellable_qty) {
+        division = 1;
+        minSellable = 1;
+      }
       sellingUnit = updates.selling_pack_unit || updates.sellingPackUnit || prev.selling_pack_unit || sellingUnit || 'bac';
       purchaseUnit = updates.source_unit || updates.sourceUnit || prev.source_unit || purchaseUnit || 'g';
     } else if (managementMode === 'amount_based') {
@@ -1604,6 +1662,20 @@ class ShopRepository {
       const sosToSave = sosPrice !== undefined ? (Number(sosPrice) > 0 ? Number(sosPrice) : undefined) : prev.sos_price;
       await this.saveVariantPricing(id, modeToSave, sosToSave);
     }
+    const updatedBuyPrice = variantUpdates.buy_price !== undefined ? Number(variantUpdates.buy_price) : Number(prev.buy_price || 0);
+    const updatedSourceQty = variantUpdates.source_quantity !== undefined ? Number(variantUpdates.source_quantity) : Number(prev.source_quantity || 0);
+    const updatedPackCount = variantUpdates.pack_count !== undefined ? Number(variantUpdates.pack_count) : Number(prev.pack_count || 0);
+    const updatedConv = conversionFactor > 0 ? conversionFactor : 1;
+    const totalActualCost = updates.total_purchase_cost !== undefined ? Number(updates.total_purchase_cost) : (updates.totalPurchaseCost !== undefined ? Number(updates.totalPurchaseCost) : updatedBuyPrice);
+    const totalUnits = (updates.total_sellable_units !== undefined ? Number(updates.total_sellable_units) : (updates.totalSellableUnits !== undefined ? Number(updates.totalSellableUnits) : (updatedPackCount > 0 ? updatedPackCount : (updatedSourceQty > 0 ? updatedSourceQty * updatedConv : updatedConv))));
+    const costPerSellingUnit = (updates.cost_per_unit !== undefined && Number(updates.cost_per_unit) > 0)
+      ? cleanPrecision(Number(updates.cost_per_unit))
+      : ((updates.costPerUnit !== undefined && Number(updates.costPerUnit) > 0)
+          ? cleanPrecision(Number(updates.costPerUnit))
+          : ((managementMode === 'pack_based' || updatedSourceQty > 0) && totalUnits > 0
+              ? cleanPrecision(totalActualCost / totalUnits)
+              : calculateCostPerBaseUnit(updatedBuyPrice, updatedConv)));
+
     await this.saveVariantModel(id, {
       management_mode: variantUpdates.management_mode,
       source_quantity: variantUpdates.source_quantity,
@@ -1613,6 +1685,9 @@ class ShopRepository {
       container_unit: variantUpdates.container_unit,
       container_capacity_liters: variantUpdates.container_capacity_liters,
       selling_options: variantUpdates.selling_options,
+      cost_per_unit: costPerSellingUnit,
+      total_purchase_cost: totalActualCost,
+      total_sellable_units: totalUnits,
     });
 
     const { fractionsMap, pricingMap, modelsMap } = await this.getVariantMaps();
@@ -1769,6 +1844,10 @@ class ShopRepository {
       containerCount?: number;
       total_purchase_cost?: number;
       totalPurchaseCost?: number;
+      total_sellable_units?: number;
+      totalSellableUnits?: number;
+      cost_per_unit?: number;
+      costPerUnit?: number;
       batch_total_cost?: number;
       batch_cost?: number;
       batchCost?: number;
@@ -1796,11 +1875,18 @@ class ShopRepository {
     let batchTotalCost = Number(data.total_purchase_cost || data.totalPurchaseCost || data.batch_cost || data.batchCost || 0);
 
     if (mMode === 'pack_based') {
-      division = 1;
-      minSellable = 1;
+      const explicitDivision = Number(data.unitDivision || (data as any).unit_division);
+      const explicitMin = Number(data.minSellableQty || (data as any).min_sellable_qty);
+      if (explicitDivision > 1 || explicitMin > 0) {
+        division = explicitDivision > 1 ? explicitDivision : (explicitMin > 0 ? Math.round(1 / explicitMin) : 1);
+        minSellable = explicitMin > 0 ? explicitMin : calculateMinSellableQty(division);
+      } else if (!data.unitDivision && !(data as any).unit_division && !data.minSellableQty && !(data as any).min_sellable_qty) {
+        division = 1;
+        minSellable = 1;
+      }
       sellingUnit = data.selling_pack_unit || data.sellingPackUnit || data.sellingUnit || 'bac';
       purchaseUnit = data.source_unit || data.sourceUnit || data.purchaseUnit || 'g';
-      addedQtyInSelling = Number(data.pack_count || data.packCount || data.quantity);
+      addedQtyInSelling = Number(data.pack_count || data.packCount || (data.quantity * conversionFactor));
     } else if (mMode === 'amount_based') {
       sellingUnit = 'liter';
       purchaseUnit = data.container_unit || data.containerUnit || data.purchaseUnit || 'caag';
@@ -1812,6 +1898,10 @@ class ShopRepository {
         batchTotalCost = Number((data.buyPrice * containers).toFixed(2));
       }
       minSellable = minSellable > 0 ? minSellable : 0.25;
+    } else {
+      if (!batchTotalCost || batchTotalCost <= 0) {
+        batchTotalCost = Number((data.buyPrice * data.quantity).toFixed(4));
+      }
     }
 
     // Search for existing product & variant
@@ -1826,17 +1916,24 @@ class ShopRepository {
     let createdBatchId: string | undefined = undefined;
 
     if (productId) {
+      let matchedVar: any = null;
       const { data: existingVars } = await supabase
         .from('product_variants')
         .select('*')
-        .eq('product_id', productId)
-        .ilike('variant_name', data.variantName.trim())
-        .limit(1);
+        .eq('product_id', productId);
 
-      if (existingVars?.[0]) {
-        const vId = existingVars[0].id;
+      if (existingVars && existingVars.length > 0) {
+        matchedVar = existingVars.find((v: any) => v.variant_name.trim().toLowerCase() === data.variantName.trim().toLowerCase());
+        if (!matchedVar && mMode === 'amount_based') {
+          // For cooking oil, always reuse the existing oil variant of this product to avoid duplicate variants
+          matchedVar = existingVars.find((v: any) => v.management_mode === 'amount_based' || v.selling_unit === 'liter') || existingVars[0];
+        }
+      }
+
+      if (matchedVar) {
+        const vId = matchedVar.id;
         variantId = vId;
-        const currentVar = existingVars[0];
+        const currentVar = matchedVar;
         const prevStock = Number(currentVar.stock_quantity);
         const newStock = Number((prevStock + addedQtyInSelling).toFixed(4));
 
@@ -1884,6 +1981,12 @@ class ShopRepository {
         if (data.pricing_mode || data.pricingMode || data.sos_price || data.sosPrice) {
           await this.saveVariantPricing(vId, pMode, sPrice);
         }
+        const totalActualCost = Number(batchTotalCost > 0 ? batchTotalCost : data.buyPrice * data.quantity);
+        const totalUnits = Number((data as any).total_sellable_units) || Number(updatePayload.pack_count) || (Number(updatePayload.source_quantity) && conversionFactor > 0 ? Number(updatePayload.source_quantity) * conversionFactor : addedQtyInSelling);
+        const costPerSellingUnit = (data as any).cost_per_unit || (data as any).costPerUnit || (totalUnits > 0 && totalActualCost > 0
+          ? cleanPrecision(totalActualCost / totalUnits)
+          : calculateCostPerBaseUnit(effectiveBuyPrice, conversionFactor));
+
         await this.saveVariantModel(vId, {
           management_mode: mMode,
           source_quantity: updatePayload.source_quantity,
@@ -1893,6 +1996,9 @@ class ShopRepository {
           container_unit: updatePayload.container_unit,
           container_capacity_liters: updatePayload.container_capacity_liters,
           selling_options: updatePayload.selling_options,
+          cost_per_unit: costPerSellingUnit,
+          total_purchase_cost: totalActualCost,
+          total_sellable_units: totalUnits,
         });
 
         // If amount_based oil, create a separate batch record
@@ -1976,6 +2082,10 @@ class ShopRepository {
         selling_options: data.selling_options || data.sellingOptions,
         initial_containers: data.container_count || data.containerCount || data.initial_containers || data.quantity,
         batch_cost: batchTotalCost,
+        total_purchase_cost: batchTotalCost,
+        total_sellable_units: (data as any).total_sellable_units || addedQtyInSelling,
+        cost_per_unit: (data as any).cost_per_unit || (data as any).costPerUnit,
+        purchase_quantity: data.quantity,
         batch_reference: data.batch_reference || data.batchReference,
       },
       reason
@@ -2059,8 +2169,15 @@ class ShopRepository {
     let addedQty = Number(((Number(data.quantityToAdd || 0)) * conversionFactor).toFixed(4));
 
     if (mMode === 'pack_based') {
-      division = 1;
-      minSellable = 1;
+      const explicitDivision = Number(data.unitDivision);
+      const explicitMin = Number(data.minSellableQty);
+      if (explicitDivision > 1 || explicitMin > 0) {
+        division = explicitDivision > 1 ? explicitDivision : (explicitMin > 0 ? Math.round(1 / explicitMin) : 1);
+        minSellable = explicitMin > 0 ? explicitMin : calculateMinSellableQty(division);
+      } else if (!data.unitDivision && !data.minSellableQty) {
+        division = 1;
+        minSellable = 1;
+      }
       sellingUnit = data.sellingPackUnit || variant.selling_pack_unit || sellingUnit || 'bac';
       purchaseUnit = data.sourceUnit || variant.source_unit || purchaseUnit || 'g';
       addedQty = Number(data.packCount || data.quantityToAdd || 0);
@@ -2159,6 +2276,12 @@ class ShopRepository {
     if (data.pricingMode || (data as any).pricing_mode || data.sosPrice || (data as any).sos_price) {
       await this.saveVariantPricing(variantId, pMode, sPrice || undefined);
     }
+    const totalActualCost = Number(finalizePayload.buy_price || 0);
+    const totalUnits = Number(finalizePayload.pack_count) || (Number(finalizePayload.source_quantity) && conversionFactor > 0 ? Number(finalizePayload.source_quantity) * conversionFactor : addedQty);
+    const costPerSellingUnit = totalUnits > 0 && totalActualCost > 0
+      ? cleanPrecision(totalActualCost / totalUnits)
+      : calculateCostPerBaseUnit(Number(finalizePayload.buy_price) || 0, conversionFactor);
+
     await this.saveVariantModel(variantId, {
       management_mode: mMode,
       source_quantity: finalizePayload.source_quantity,
@@ -2168,6 +2291,9 @@ class ShopRepository {
       container_unit: finalizePayload.container_unit,
       container_capacity_liters: finalizePayload.container_capacity_liters,
       selling_options: finalizePayload.selling_options,
+      cost_per_unit: costPerSellingUnit,
+      total_purchase_cost: totalActualCost,
+      total_sellable_units: totalUnits,
     });
 
     const { fractionsMap, pricingMap, modelsMap } = await this.getVariantMaps();
@@ -2748,6 +2874,15 @@ class ShopRepository {
       const unitLabel = curVar?.selling_unit || item.variant.selling_unit || 'xabo';
       const itemName = (curVar?.product as any)?.name || item.product?.name || item.variant?.variant_name || 'Alaabta';
 
+      const isMoneyOil = Boolean(item.selling_option_label || (item as any).amount_based_value);
+      if (!isMoneyOil) {
+        const step = getVariantStep(item.variant);
+        const val = isValidSellableQuantity(Number(item.quantity), step, unitLabel, item.variant.management_mode);
+        if (!val.valid) {
+          throw new Error(`Tirada la iibinayo ma aha qeyb sax ah (${itemName}): ${val.reason}`);
+        }
+      }
+
       if (currentStock < qtyToDeduct) {
         throw new Error(`Stock-ka ayaa is beddelay intii aad offline ahayd ama kuma filna: ${itemName}. Waxaa haray kaliya ${currentStock} ${unitLabel}, laakiin waxaad isku dayday inaad iibiso ${qtyToDeduct} ${unitLabel}.`);
       }
@@ -3003,7 +3138,9 @@ class ShopRepository {
     for (const item of payload.items || []) {
       const { data: v } = await supabase.from('product_variants').select('*').eq('id', item.productVariantId).single();
       if (!v) continue;
-      const unitCost = calculateCostPerBaseUnit(v.buy_price, v.conversion_factor);
+      const { fractionsMap, pricingMap, modelsMap } = await this.getVariantMaps();
+      const formatted = this.formatVariantWithFractions(v, fractionsMap, pricingMap, modelsMap);
+      const unitCost = formatted.cost_per_unit || calculateCostPerBaseUnit(formatted.buy_price, formatted.conversion_factor, formatted);
       subtotal += item.quantity * item.unitPrice - (item.discount || 0);
       totalCost += item.quantity * unitCost;
 
@@ -3039,7 +3176,9 @@ class ShopRepository {
 
     for (const item of payload.items || []) {
       const { data: v } = await supabase.from('product_variants').select('*').eq('id', item.productVariantId).single();
-      const unitCost = v ? calculateCostPerBaseUnit(v.buy_price, v.conversion_factor) : 0;
+      const { fractionsMap, pricingMap, modelsMap } = await this.getVariantMaps();
+      const formatted = v ? this.formatVariantWithFractions(v, fractionsMap, pricingMap, modelsMap) : null;
+      const unitCost = formatted ? (formatted.cost_per_unit || calculateCostPerBaseUnit(formatted.buy_price, formatted.conversion_factor, formatted)) : 0;
       const itemTotal = roundToCents(item.quantity * item.unitPrice - (item.discount || 0));
       const itemCostTotal = cleanPrecision(item.quantity * unitCost);
       const itemProfit = cleanPrecision(itemTotal - itemCostTotal);

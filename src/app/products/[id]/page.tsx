@@ -15,7 +15,8 @@ import {
   Plus, 
   CheckCircle2, 
   AlertTriangle,
-  Layers
+  Layers,
+  Droplet
 } from 'lucide-react';
 import { AppShell } from '@/components/layout/app-shell';
 import { Button } from '@/components/ui/button';
@@ -23,8 +24,8 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/toast';
 import { repository } from '@/lib/services/repository';
-import { formatMoney, formatUnitMoney } from '@/lib/calculations/financials';
-import { calculateCostPerBaseUnit, calculateUnitProfit, getStockStatus } from '@/lib/calculations/stock';
+import { formatMoney, formatUnitMoney, cleanPrecision } from '@/lib/calculations/financials';
+import { calculateCostPerBaseUnit, calculateUnitProfit, getStockStatus, getDefaultOilSellingMeasures } from '@/lib/calculations/stock';
 import { Product, ProductVariant, StockMovement } from '@/types';
 
 export default function ProductDetailPage() {
@@ -198,46 +199,134 @@ export default function ProductDetailPage() {
             {selectedVariant ? (
               <>
                 {/* Variant Highlights */}
-                <Card className="p-5 border border-slate-200/80 dark:border-slate-800 shadow-xs">
-                  <h3 className="text-sm font-black text-slate-900 dark:text-white mb-4 flex items-center gap-2">
-                    <Layers className="h-4 w-4 text-emerald-600" />
-                    Faahfaahinta: {selectedVariant.variant_name}
-                  </h3>
+                {(() => {
+                  const exactCost = selectedVariant.cost_per_unit || calculateCostPerBaseUnit(selectedVariant.buy_price, selectedVariant.conversion_factor, selectedVariant);
+                  const exactProfit = cleanPrecision(selectedVariant.sell_price - exactCost);
+                  const isLoss = exactProfit < 0;
+                  const minQty = selectedVariant.min_sellable_qty || (selectedVariant.unit_division ? cleanPrecision(1 / selectedVariant.unit_division) : 1);
+                  const sUnit = (selectedVariant.selling_pack_unit || selectedVariant.selling_unit || 'unit').toUpperCase();
+                  const pUnit = (selectedVariant.purchase_unit || 'unit').toUpperCase();
 
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs font-mono">
-                    <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl">
-                      <p className="text-[10px] text-slate-400 uppercase font-sans">Soo Iibka</p>
-                      <p className="text-base font-bold text-slate-900 dark:text-white mt-0.5">
-                        {formatMoney(selectedVariant.buy_price)}
-                      </p>
-                      <p className="text-[10px] text-slate-500 font-sans">1 {selectedVariant.purchase_unit}</p>
+                  return (
+                    <Card className="p-5 border border-slate-200/80 dark:border-slate-800 shadow-xs">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-sm font-black text-slate-900 dark:text-white flex items-center gap-2">
+                          <Layers className="h-4 w-4 text-emerald-600" />
+                          Faahfaahinta: {selectedVariant.variant_name}
+                        </h3>
+                        <div className="flex items-center gap-2">
+                          {selectedVariant.conversion_factor > 1 && (
+                            <Badge variant="outline" className="font-mono text-xs bg-slate-50 dark:bg-slate-800 border-slate-300">
+                              1 {pUnit} = {selectedVariant.conversion_factor} {sUnit}
+                            </Badge>
+                          )}
+                          <Badge variant="outline" className="font-mono text-xs bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border-blue-200">
+                            Min: {minQty} {sUnit}
+                          </Badge>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs font-mono">
+                        {/* 1. PURCHASE */}
+                        <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl">
+                          <p className="text-[10px] text-slate-400 uppercase font-sans">Soo Iibka (Purchase)</p>
+                          <p className="text-base font-bold text-slate-900 dark:text-white mt-0.5">
+                            {formatMoney(selectedVariant.buy_price)}
+                          </p>
+                          <p className="text-[10px] text-slate-500 font-sans">/ {pUnit}</p>
+                        </div>
+
+                        {/* 2. EXACT COST PER SELLING UNIT */}
+                        <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700/60">
+                          <p className="text-[10px] text-slate-400 uppercase font-sans">Exact Cost</p>
+                          <p className="text-base font-bold text-slate-800 dark:text-slate-200 mt-0.5">
+                            ${exactCost.toFixed(exactCost % 1 === 0 ? 2 : (exactCost * 100 % 1 === 0 ? 2 : (exactCost * 1000 % 1 === 0 ? 3 : 4)))}
+                          </p>
+                          <p className="text-[10px] text-slate-500 font-sans">/ {sUnit}</p>
+                        </div>
+
+                        {/* 3. SELLING PRICE */}
+                        <div className="p-3 bg-emerald-50/60 dark:bg-emerald-950/40 rounded-xl">
+                          <p className="text-[10px] text-emerald-800 dark:text-emerald-300 uppercase font-sans">Iibinta (Sell)</p>
+                          <p className="text-base font-black text-emerald-600 dark:text-emerald-400 mt-0.5">
+                            {formatMoney(selectedVariant.sell_price)}
+                          </p>
+                          <p className="text-[10px] text-slate-500 font-sans">/ {sUnit}</p>
+                        </div>
+
+                        {/* 4. EXACT PROFIT OR LOSS */}
+                        <div className={`p-3 rounded-xl border ${
+                          isLoss 
+                            ? 'bg-red-50/80 dark:bg-red-950/40 border-red-300 dark:border-red-800 text-red-900 dark:text-red-200' 
+                            : 'bg-emerald-50/80 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200'
+                        }`}>
+                          <p className={`text-[10px] uppercase font-sans font-bold ${isLoss ? 'text-red-700 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'}`}>
+                            {isLoss ? 'Khasaare (Loss)' : 'Faa\'iido (Profit)'}
+                          </p>
+                          <p className={`text-base font-black mt-0.5 ${isLoss ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                            {exactProfit >= 0 ? '+' : ''}${exactProfit.toFixed(exactProfit % 1 === 0 ? 2 : (exactProfit * 100 % 1 === 0 ? 2 : (exactProfit * 1000 % 1 === 0 ? 3 : 4)))}
+                          </p>
+                          <p className="text-[10px] font-sans">/ {sUnit}</p>
+                        </div>
+
+                        {/* 5. STOCK */}
+                        <div className="p-3 bg-purple-50/60 dark:bg-purple-950/40 rounded-xl">
+                          <p className="text-[10px] text-purple-800 dark:text-purple-300 uppercase font-sans">Kaydka (Stock)</p>
+                          <p className="text-base font-black text-purple-700 dark:text-purple-300 mt-0.5">
+                            {selectedVariant.stock_quantity.toLocaleString()}
+                          </p>
+                          <p className="text-[10px] text-slate-500 font-sans">{sUnit}</p>
+                        </div>
+                      </div>
+                    </Card>
+                  );
+                })()}
+
+                {/* Cooking Oil Selling Measures Section (Cabbirrada Iibka) */}
+                {(selectedVariant.management_mode === 'amount_based' || selectedVariant.selling_unit === 'liter') && (
+                  <Card className="p-5 border border-slate-200/80 dark:border-slate-800 shadow-xs space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Droplet className="h-4 w-4 text-amber-600" />
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">
+                          Cabbirrada Iibka (Cooking Oil Measures)
+                        </h3>
+                      </div>
+                      <Badge variant="outline" className="text-[10px] bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border-amber-300">
+                        7 Cabbir
+                      </Badge>
                     </div>
 
-                    <div className="p-3 bg-emerald-50/60 dark:bg-emerald-950/40 rounded-xl">
-                      <p className="text-[10px] text-emerald-800 dark:text-emerald-300 uppercase font-sans">Iibinta</p>
-                      <p className="text-base font-black text-emerald-600 dark:text-emerald-400 mt-0.5">
-                        {formatMoney(selectedVariant.sell_price)}
-                      </p>
-                      <p className="text-[10px] text-slate-500 font-sans">1 {selectedVariant.selling_unit}</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2">
+                      {(selectedVariant.selling_options && selectedVariant.selling_options.length > 0 
+                        ? selectedVariant.selling_options 
+                        : getDefaultOilSellingMeasures(selectedVariant.sell_price || 1.85)
+                      ).map((m: any, idx: number) => (
+                        <div
+                          key={m.code || idx}
+                          className="p-2.5 rounded-xl border border-amber-200/80 dark:border-amber-900/60 bg-amber-50/40 dark:bg-amber-950/20 text-center flex flex-col justify-between"
+                        >
+                          <div>
+                            <span className="font-black text-slate-900 dark:text-white text-xs block">
+                              {m.name || m.label}
+                            </span>
+                            <span className="text-[10px] text-slate-500 font-medium block leading-tight mt-0.5">
+                              {m.description || 'Cabbir toos ah'}
+                            </span>
+                          </div>
+                          <div className="mt-2 pt-1 border-t border-amber-200/60 dark:border-amber-900/40">
+                            <span className="text-xs font-black font-mono text-emerald-700 dark:text-emerald-400 block">
+                              ${(m.display_price ?? m.amount ?? 0).toFixed(2)}
+                            </span>
+                            <span className="text-[10px] font-mono text-slate-400 block">
+                              {m.quantity_liters ?? m.default_qty ?? '—'} L
+                            </span>
+                          </div>
+                        </div>
+                      ))}
                     </div>
-
-                    <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl">
-                      <p className="text-[10px] text-slate-400 uppercase font-sans">Cost/Base Unit</p>
-                      <p className="text-base font-bold text-slate-900 dark:text-white mt-0.5">
-                        {formatUnitMoney(calculateCostPerBaseUnit(selectedVariant.buy_price, selectedVariant.conversion_factor))}
-                      </p>
-                      <p className="text-[10px] text-slate-500 font-sans">1 {selectedVariant.selling_unit}</p>
-                    </div>
-
-                    <div className="p-3 bg-purple-50/60 dark:bg-purple-950/40 rounded-xl">
-                      <p className="text-[10px] text-purple-800 dark:text-purple-300 uppercase font-sans">Kaydka Hadda</p>
-                      <p className="text-base font-black text-purple-700 dark:text-purple-300 mt-0.5">
-                        {selectedVariant.stock_quantity.toLocaleString()}
-                      </p>
-                      <p className="text-[10px] text-slate-500 font-sans">{selectedVariant.selling_unit}</p>
-                    </div>
-                  </div>
-                </Card>
+                  </Card>
+                )}
 
                 {/* Stock Movement Audit Log */}
                 <Card className="border border-slate-200/80 dark:border-slate-800 shadow-xs overflow-hidden">

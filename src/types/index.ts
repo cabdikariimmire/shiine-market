@@ -39,13 +39,15 @@ export interface CartItem {
   sosPrice?: number | null; // Configured price in SOS for denomination items
   sosTotal?: number; // quantity * sosPrice
   management_mode?: 'standard' | 'pack_based' | 'amount_based';
-  selling_method?: 'liter' | 'money'; // 'liter' | 'money'
+  selling_method?: 'liter' | 'money' | 'measure'; // 'liter' | 'money' | 'measure'
   actual_quantity_used?: number; // actual liters poured/used for oil
   batch_id?: string; // active batch ID
-  selling_option_label?: string; // e.g. '5,000 SOS' or 'Rubac weyn $0.50'
+  selling_option_label?: string; // e.g. '5K', '6K', '1 Liter', '5,000 SOS'
   selling_option_id?: string;
   amount_based_currency?: 'SOS' | 'USD';
   amount_based_value?: number;
+  customer_payment?: number; // amount customer sent (e.g. $0.20)
+  change_amount?: number; // change returned to customer (e.g. $0.05)
   discount: number;
   totalPrice: number;
   grossProfit: number;

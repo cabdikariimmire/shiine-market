@@ -204,7 +204,7 @@ export function ProductsScreen({ initialStockFilter, onSelectForPos }: ProductsS
               </Text>
               {item.conversion_factor > 1 && (
                 <Text style={{ fontSize: 10, color: '#64748b', marginTop: 1 }}>
-                  (Cost: {formatUnitMoney(calculateCostPerBaseUnit(item.buy_price, item.conversion_factor))}/{item.selling_unit})
+                  (Cost: {formatUnitMoney(item.cost_per_unit || calculateCostPerBaseUnit(item.buy_price, item.conversion_factor, item))}/{item.selling_unit})
                 </Text>
               )}
             </View>

@@ -39,7 +39,7 @@ import { Card } from '@/components/ui/card';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter, DialogClose } from '@/components/ui/dialog';
 import { useToast } from '@/components/ui/toast';
 import { repository } from '@/lib/services/repository';
-import { formatMoney, formatUnitMoney } from '@/lib/calculations/financials';
+import { formatMoney, formatUnitMoney, cleanPrecision } from '@/lib/calculations/financials';
 import { calculateSosDenomination, formatSos } from '@/lib/calculations/denominations';
 import { 
   calculateCostPerBaseUnit, 
@@ -49,8 +49,16 @@ import {
   calculatePackRatio,
   calculateBatchCostPerUnit,
   calculateBatchVariance,
+  calculateProductModel,
+  ShopProductType,
+  ProductModelCalculation,
+  getVariantStep,
+  isValidSellableQuantity,
   ALLOWED_INCOMING_UNITS,
-  ALLOWED_SELLING_UNITS 
+  ALLOWED_SELLING_UNITS,
+  OilSellingMeasure,
+  getDefaultOilSellingMeasures,
+  calculateCookingOilRegistration
 } from '@/lib/calculations/stock';
 import { Category, ProductVariant, StockMovement, Supplier, ProductBatch } from '@/types';
 import { useAuth } from '@/lib/auth/auth-context';
@@ -78,15 +86,20 @@ export default function ProductsPage() {
   // Modals & Action States
   const [activeActionMenuId, setActiveActionMenuId] = useState<string | null>(null);
 
-  // Stock In Modal ("Soo Xaree Alaab") - Empty input rule: blank string
+  // Stock In Modal ("Soo Xaree Alaab") - Redesigned 4-Product-Model
   const [isStockInOpen, setIsStockInOpen] = useState(false);
+  const [stockInProductType, setStockInProductType] = useState<ShopProductType>('jawan');
   const [stockInProduct, setStockInProduct] = useState('');
   const [stockInVariant, setStockInVariant] = useState('');
   const [stockInQty, setStockInQty] = useState<string>('');
   const [stockInPUnit, setStockInPUnit] = useState('jawan');
   const [stockInSUnit, setStockInSUnit] = useState('kg');
-  const [stockInConv, setStockInConv] = useState<string>('');
-  const [stockInDivision, setStockInDivision] = useState<string>('1');
+  const [stockInConv, setStockInConv] = useState<string>('25');
+  const [stockInPackWeight, setStockInPackWeight] = useState<string>('0.5');
+  const [stockInLooseMode, setStockInLooseMode] = useState<'kg_per_bag' | 'bags_per_kg'>('kg_per_bag');
+  const [stockInTotalBuy, setStockInTotalBuy] = useState<string>('');
+  const [stockInMinSellableQty, setStockInMinSellableQty] = useState<string>('0.05');
+  const [stockInDivision, setStockInDivision] = useState<string>('20');
   const [stockInPricingMode, setStockInPricingMode] = useState<'fixed' | 'denomination'>('fixed');
   const [stockInSosPrice, setStockInSosPrice] = useState<string>('');
   const [stockInBuy, setStockInBuy] = useState<string>('');
@@ -107,8 +120,15 @@ export default function ProductsPage() {
   const [stockInBatchCost, setStockInBatchCost] = useState<string>('');
   const [stockInBatchRef, setStockInBatchRef] = useState<string>('');
 
+  // Cooking Oil dedicated selling measures state
+  const [stockInOilMeasures, setStockInOilMeasures] = useState<OilSellingMeasure[]>(getDefaultOilSellingMeasures(1.85));
+  const [showStockInOilMeasureConfig, setShowStockInOilMeasureConfig] = useState(false);
+  const [editOilMeasures, setEditOilMeasures] = useState<OilSellingMeasure[]>(getDefaultOilSellingMeasures(1.85));
+  const [showEditOilMeasureConfig, setShowEditOilMeasureConfig] = useState(false);
+
   // Edit / Finalize Modal (Real zero rule: prefilled with actual values)
   const [editingVariant, setEditingVariant] = useState<ProductVariant | null>(null);
+  const [editProductType, setEditProductType] = useState<ShopProductType>('jawan');
   const [editProductName, setEditProductName] = useState('');
   const [editVariantName, setEditVariantName] = useState('');
   const [editSku, setEditSku] = useState('');
@@ -117,7 +137,11 @@ export default function ProductsPage() {
   const [editPurchaseUnit, setEditPurchaseUnit] = useState('jawan');
   const [editSellPrice, setEditSellPrice] = useState<string>('');
   const [editSellingUnit, setEditSellingUnit] = useState('kg');
-  const [editConversion, setEditConversion] = useState<string>('');
+  const [editConversion, setEditConversion] = useState<string>('25');
+  const [editPackWeight, setEditPackWeight] = useState<string>('0.5');
+  const [editLooseMode, setEditLooseMode] = useState<'kg_per_bag' | 'bags_per_kg'>('kg_per_bag');
+  const [editTotalBuy, setEditTotalBuy] = useState<string>('');
+  const [editMinSellableQty, setEditMinSellableQty] = useState<string>('0.05');
   const [editDivision, setEditDivision] = useState<string>('1');
   const [editPricingMode, setEditPricingMode] = useState<'fixed' | 'denomination'>('fixed');
   const [editSosPrice, setEditSosPrice] = useState<string>('');
@@ -136,6 +160,86 @@ export default function ProductsPage() {
   const [editContainerCount, setEditContainerCount] = useState<string>('4');
   const [editContainerUnit, setEditContainerUnit] = useState<string>('caag');
   const [editContainerCapacity, setEditContainerCapacity] = useState<string>('20');
+
+  const selectStockInProductType = (type: ShopProductType) => {
+    setStockInProductType(type);
+    if (type === 'jawan') {
+      setStockInPUnit('jawan');
+      setStockInSUnit('kg');
+      setStockInConv('25');
+      setStockInMinSellableQty('0.05');
+      setStockInDivision('20');
+      setStockInManagementMode('standard');
+    } else if (type === 'liquid') {
+      setStockInProduct('Saliid');
+      setStockInVariant('Caag 20L');
+      setStockInPUnit('caag');
+      setStockInSUnit('liter');
+      setStockInConv('20');
+      setStockInQty('3');
+      setStockInBuy('29.70');
+      setStockInSell('1.85');
+      setStockInMinSellableQty('0.0625');
+      setStockInDivision('16');
+      setStockInManagementMode('amount_based');
+      setStockInContainerUnit('caag');
+      setStockInContainerCapacity('20');
+      setStockInOilMeasures(getDefaultOilSellingMeasures(1.85));
+    } else if (type === 'carton') {
+      setStockInPUnit('carton');
+      setStockInSUnit('bac');
+      setStockInConv('20');
+      setStockInPackWeight('0.5');
+      setStockInMinSellableQty('0.5');
+      setStockInDivision('2');
+      setStockInManagementMode('pack_based');
+      setStockInSellingPackUnit('bac');
+    } else if (type === 'loose') {
+      setStockInPUnit('kg');
+      setStockInSUnit('bac');
+      setStockInLooseMode('kg_per_bag');
+      setStockInConv('0.05');
+      setStockInMinSellableQty('1');
+      setStockInDivision('1');
+      setStockInManagementMode('pack_based');
+      setStockInSellingPackUnit('bac');
+    }
+  };
+
+  const selectEditProductType = (type: ShopProductType) => {
+    setEditProductType(type);
+    if (type === 'jawan') {
+      setEditPurchaseUnit('jawan');
+      setEditSellingUnit('kg');
+      if (!editConversion || editConversion === '1') setEditConversion('25');
+      if (!editMinSellableQty) setEditMinSellableQty('0.05');
+      setEditManagementMode('standard');
+    } else if (type === 'liquid') {
+      setEditPurchaseUnit('caag');
+      setEditSellingUnit('liter');
+      if (!editConversion || editConversion === '1') setEditConversion('20');
+      if (!editMinSellableQty) setEditMinSellableQty('0.10');
+      setEditManagementMode('amount_based');
+      setEditContainerUnit('caag');
+      setEditContainerCapacity('20');
+    } else if (type === 'carton') {
+      setEditPurchaseUnit('carton');
+      setEditSellingUnit('bac');
+      if (!editConversion || editConversion === '1') setEditConversion('20');
+      setEditPackWeight('0.5');
+      if (!editMinSellableQty) setEditMinSellableQty('0.5');
+      setEditManagementMode('pack_based');
+      setEditSellingPackUnit('bac');
+    } else if (type === 'loose') {
+      setEditPurchaseUnit('kg');
+      setEditSellingUnit('bac');
+      setEditLooseMode('kg_per_bag');
+      if (!editConversion || editConversion === '1') setEditConversion('0.05');
+      if (!editMinSellableQty) setEditMinSellableQty('1');
+      setEditManagementMode('pack_based');
+      setEditSellingPackUnit('bac');
+    }
+  };
 
   // Oil Batches Management Modal State
   const [batchModalVariant, setBatchModalVariant] = useState<ProductVariant | null>(null);
@@ -202,6 +306,10 @@ export default function ProductsPage() {
           ? Math.round(1 / Number(v.min_sellable_qty)) 
           : 1);
     setEditDivision(String(division));
+    const minSell = v.min_sellable_qty !== undefined && Number(v.min_sellable_qty) > 0
+      ? String(v.min_sellable_qty)
+      : (division > 1 ? String(1 / division) : '1');
+    setEditMinSellableQty(minSell);
     setEditPricingMode(v.pricing_mode || 'fixed');
     setEditSosPrice(v.sos_price ? String(v.sos_price) : '');
     setEditMinStock(String(v.minimum_stock ?? 0));
@@ -213,6 +321,17 @@ export default function ProductsPage() {
     // Model configuration
     const mMode = v.management_mode || 'standard';
     setEditManagementMode(mMode);
+    let pType: ShopProductType = 'jawan';
+    if (mMode === 'amount_based' || v.selling_unit === 'liter' || v.purchase_unit === 'caag') {
+      pType = 'liquid';
+    } else if (v.purchase_unit === 'carton') {
+      pType = 'carton';
+    } else if (mMode === 'pack_based') {
+      pType = 'loose';
+    } else if (v.purchase_unit === 'jawan' || v.selling_unit === 'kg') {
+      pType = 'jawan';
+    }
+    setEditProductType(pType);
     setEditSourceQty(String(v.source_quantity || 500));
     setEditSourceUnit(v.source_unit || 'g');
     setEditPackCount(String(v.pack_count || 10));
@@ -231,38 +350,52 @@ export default function ProductsPage() {
       return;
     }
 
-    const mMode = editManagementMode;
-    const sQty = parseFloat(editSourceQty) || 500;
-    const sUnit = editSourceUnit || 'g';
-    const pCount = Math.max(1, parseFloat(editPackCount) || 10);
-    const sPackUnit = editSellingPackUnit || 'bac';
-    const cCount = Math.max(1, parseFloat(editContainerCount) || 1);
-    const cUnit = editContainerUnit || 'caag';
-    const cCapacity = Math.max(0.1, parseFloat(editContainerCapacity) || 20);
-
+    const pType = editProductType;
+    const mMode = pType === 'liquid' ? 'amount_based' : (pType === 'carton' || pType === 'loose' ? 'pack_based' : 'standard');
     const buyPrice = parseFloat(editBuyPrice) || 0;
     const sellPrice = parseFloat(editSellPrice) || 0;
-    const conversion = mMode === 'amount_based' ? cCapacity : (mMode === 'pack_based' ? pCount : (parseFloat(editConversion) || 1));
-    const division = Math.max(1, parseFloat(editDivision) || 1);
-    const minSellable = calculateMinSellableQty(division);
+    const minSellable = parseFloat(editMinSellableQty) || 1;
     const minStock = parseFloat(editMinStock) || 0;
     const incomingQty = parseFloat(editIncomingQty) || 0;
     const sosPriceVal = editPricingMode === 'denomination' ? (parseFloat(editSosPrice) || 0) : undefined;
+    const effectiveSellPrice = editPricingMode === 'denomination' && sosPriceVal ? calculateSosDenomination(sosPriceVal).denominationUsd : sellPrice;
 
-    const finalSellingUnit = mMode === 'pack_based' ? sPackUnit : (mMode === 'amount_based' ? 'liter' : editSellingUnit);
-    const finalPurchaseUnit = mMode === 'pack_based' ? sUnit : (mMode === 'amount_based' ? cUnit : editPurchaseUnit);
+    let conv = parseFloat(editConversion) || 1;
+    if (pType === 'liquid') {
+      conv = parseFloat(editContainerCapacity) || 20;
+    } else if (pType === 'carton') {
+      conv = parseFloat(editConversion) || 20;
+    } else if (pType === 'loose') {
+      conv = parseFloat(editConversion) || 0.05;
+    }
+
+    // Authoritative calculation
+    const calc = calculateProductModel({
+      productType: pType,
+      purchaseQuantity: incomingQty > 0 ? incomingQty : 1,
+      costPerPurchaseUnit: buyPrice,
+      totalPurchaseCost: editTotalBuy ? parseFloat(editTotalBuy) : undefined,
+      conversionValue: conv,
+      loosePackMode: editLooseMode,
+      packContentWeight: parseFloat(editPackWeight) || undefined,
+      sellingPrice: effectiveSellPrice,
+      minSellableQty: minSellable,
+    });
+
+    const finalSellingUnit = pType === 'liquid' ? 'liter' : (pType === 'carton' || pType === 'loose' ? (editSellingPackUnit || 'bac') : editSellingUnit);
+    const finalPurchaseUnit = pType === 'liquid' ? (editContainerUnit || 'caag') : (pType === 'carton' ? 'carton' : (pType === 'loose' ? 'kg' : editPurchaseUnit));
 
     try {
       if (editingVariant.is_pending) {
         await repository.finalizePendingVariant(editingVariant.id, {
           productName: editProductName.trim(),
           variantName: editVariantName.trim(),
-          buyPrice: buyPrice,
+          buyPrice: calc.costPerSellingUnit,
           purchaseUnit: finalPurchaseUnit,
-          sellPrice: sellPrice,
+          sellPrice: effectiveSellPrice,
           sellingUnit: finalSellingUnit,
-          conversionFactor: conversion,
-          unitDivision: division,
+          conversionFactor: conv,
+          unitDivision: Math.max(1, Math.round(1 / minSellable)),
           minSellableQty: minSellable,
           pricingMode: editPricingMode,
           sosPrice: sosPriceVal,
@@ -271,12 +404,12 @@ export default function ProductsPage() {
           minimumStock: minStock,
           supplierId: editSupplierId.trim() ? editSupplierId.trim() : undefined,
           management_mode: mMode,
-          source_quantity: mMode === 'pack_based' ? sQty : undefined,
-          source_unit: mMode === 'pack_based' ? sUnit : undefined,
-          pack_count: mMode === 'pack_based' ? pCount : undefined,
-          selling_pack_unit: mMode === 'pack_based' ? sPackUnit : undefined,
-          container_unit: mMode === 'amount_based' ? cUnit : undefined,
-          container_capacity_liters: mMode === 'amount_based' ? cCapacity : undefined,
+          source_quantity: pType === 'loose' ? parseFloat(editSourceQty) : undefined,
+          source_unit: pType === 'loose' ? editSourceUnit : undefined,
+          pack_count: pType === 'loose' || pType === 'carton' ? calc.totalStockQuantity : undefined,
+          selling_pack_unit: pType === 'loose' || pType === 'carton' ? finalSellingUnit : undefined,
+          container_unit: pType === 'liquid' ? (editContainerUnit || 'caag') : undefined,
+          container_capacity_liters: pType === 'liquid' ? conv : undefined,
         }, editReason.trim() || `Xaqiijiyey AI pending: ${editProductName}`);
         success('Alaabta waa la xaqiijiyey!', `${editProductName} (${editVariantName}) hadda waa rasmi.`);
       } else {
@@ -288,22 +421,25 @@ export default function ProductsPage() {
           barcode: editBarcode.trim() || null,
           buy_price: buyPrice,
           purchase_unit: finalPurchaseUnit,
-          sell_price: sellPrice,
+          sell_price: effectiveSellPrice,
           selling_unit: finalSellingUnit,
-          conversion_factor: conversion,
-          unit_division: division,
+          conversion_factor: conv,
+          unit_division: Math.max(1, Math.round(1 / minSellable)),
           min_sellable_qty: minSellable,
           pricing_mode: editPricingMode,
           sos_price: sosPriceVal,
           minimum_stock: minStock,
           supplier_id: editSupplierId.trim() ? editSupplierId.trim() : null,
           management_mode: mMode,
-          source_quantity: mMode === 'pack_based' ? sQty : undefined,
-          source_unit: mMode === 'pack_based' ? sUnit : undefined,
-          pack_count: mMode === 'pack_based' ? pCount : undefined,
-          selling_pack_unit: mMode === 'pack_based' ? sPackUnit : undefined,
-          container_unit: mMode === 'amount_based' ? cUnit : undefined,
-          container_capacity_liters: mMode === 'amount_based' ? cCapacity : undefined,
+          cost_per_unit: calc.costPerSellingUnit,
+          total_purchase_cost: calc.totalPurchaseCost,
+          total_sellable_units: calc.totalStockQuantity,
+          source_quantity: pType === 'loose' ? parseFloat(editSourceQty) : undefined,
+          source_unit: pType === 'loose' ? editSourceUnit : undefined,
+          pack_count: pType === 'loose' || pType === 'carton' ? calc.totalStockQuantity : undefined,
+          selling_pack_unit: pType === 'loose' || pType === 'carton' ? finalSellingUnit : undefined,
+          container_unit: pType === 'liquid' ? (editContainerUnit || 'caag') : undefined,
+          container_capacity_liters: pType === 'liquid' ? conv : undefined,
         }, editReason.trim() || `Wax ka beddel alaabta: ${editProductName} (${editVariantName})`);
         success('Xogta si guul leh ayaa loo saxay.', `${editProductName} (${editVariantName})`);
       }
@@ -367,127 +503,100 @@ export default function ProductsPage() {
 
   // Handle Manual Incoming Stock Save (Stock In)
   const handleSaveStockIn = async () => {
-    const mMode = stockInManagementMode;
+    const pType = stockInProductType;
     let qty = parseFloat(stockInQty);
     let conv = parseFloat(stockInConv) || 1;
     let pUnit = stockInPUnit;
     let sUnit = stockInSUnit;
     let buy = parseFloat(stockInBuy) || 0;
     let sell = parseFloat(stockInSell);
-    const division = Math.max(1, parseFloat(stockInDivision) || 1);
-    const minSellable = calculateMinSellableQty(division);
+    const minSellable = parseFloat(stockInMinSellableQty) || 1;
     const min = parseFloat(stockInMin) || 0;
     const sosPriceVal = stockInPricingMode === 'denomination' ? (parseFloat(stockInSosPrice) || 0) : undefined;
+    const effectiveSellPrice = stockInPricingMode === 'denomination' && sosPriceVal ? calculateSosDenomination(sosPriceVal).denominationUsd : sell;
 
     if (!stockInProduct.trim() || !stockInVariant.trim()) {
-      error('Geli magaca alaabta iyo nooca');
+      error('Geli magaca alaabta iyo nooca (Product & Variant name)');
       return;
     }
 
-    if (mMode === 'pack_based') {
-      const sQty = parseFloat(stockInSourceQty) || 500;
-      const sUnitVal = stockInSourceUnit || 'g';
-      const pCount = Math.max(1, parseFloat(stockInPackCount) || 10);
-      const sPackUnit = stockInSellingPackUnit || 'bac';
+    if (isNaN(qty) || qty <= 0) {
+      error('Geli tirada aad soo iisatay (Quantity purchased)');
+      return;
+    }
 
-      qty = pCount; // Stock tracks number of bags
-      pUnit = sUnitVal;
-      sUnit = sPackUnit;
-      conv = pCount;
-
-      if (stockInPricingMode === 'denomination') {
-        if (!sosPriceVal || sosPriceVal <= 0) {
-          error('Geli qiimaha SOS ee halkii Bac (tusaale: 1000 SOS)');
-          return;
-        }
-        sell = calculateSosDenomination(sosPriceVal).denominationUsd;
-      } else {
-        if (isNaN(sell) || sell <= 0) {
-          error('Geli qiimaha iibinta ee halkii Bac ($)');
-          return;
-        }
-      }
-    } else if (mMode === 'amount_based') {
-      const cCount = Math.max(1, parseFloat(stockInContainerCount) || parseFloat(stockInQty) || 1);
-      const cUnit = stockInContainerUnit || 'caag';
-      const cCapacity = Math.max(0.1, parseFloat(stockInContainerCapacity) || 20);
-      const totalBatchCost = parseFloat(stockInBatchCost) || (buy > 0 ? buy : (buy * cCount)) || 0;
-
-      qty = cCount; // e.g. 4 Caag
-      pUnit = cUnit;
-      sUnit = 'liter';
-      conv = cCapacity; // 1 Caag = 20 Liters
-      buy = totalBatchCost; // batch cost
-
-      if (isNaN(sell) || sell <= 0) {
-        sell = 0.50; // default baseline unit price
-      }
-    } else {
-      if (isNaN(qty) || qty <= 0) {
-        error('Geli tirada soo gashay (quantity)');
+    if (stockInPricingMode === 'denomination') {
+      if (!sosPriceVal || sosPriceVal <= 0) {
+        error('Geli qiimaha SOS ee saxda ah (tusaale: 5000 SOS)');
         return;
       }
-      if (stockInPricingMode === 'denomination') {
-        if (!sosPriceVal || sosPriceVal <= 0) {
-          error('Geli qiimaha SOS ee saxda ah (tusaale: 5000 SOS)');
-          return;
-        }
-        if (isNaN(sell) || sell <= 0) {
-          sell = calculateSosDenomination(sosPriceVal).denominationUsd;
-        }
-      } else {
-        if (isNaN(sell) || sell <= 0) {
-          error('Geli qiimaha iibinta');
-          return;
-        }
+    } else {
+      if (isNaN(sell) || sell <= 0) {
+        error('Geli qiimaha iibinta ee saxda ah ($)');
+        return;
       }
     }
 
+    // Authoritative calculation
+    const calc = calculateProductModel({
+      productType: pType,
+      purchaseQuantity: qty,
+      costPerPurchaseUnit: buy,
+      totalPurchaseCost: stockInTotalBuy ? parseFloat(stockInTotalBuy) : undefined,
+      conversionValue: conv,
+      loosePackMode: stockInLooseMode,
+      packContentWeight: parseFloat(stockInPackWeight) || undefined,
+      sellingPrice: effectiveSellPrice,
+      minSellableQty: minSellable,
+    });
+
+    const mMode = pType === 'liquid' ? 'amount_based' : (pType === 'carton' || pType === 'loose' ? 'pack_based' : 'standard');
+
     try {
       await repository.recordIncomingStock({
-        productName: stockInProduct,
-        variantName: stockInVariant,
-        quantity: qty,
+        productName: stockInProduct.trim(),
+        variantName: stockInVariant.trim(),
+        quantity: pType === 'carton' || pType === 'loose' ? calc.totalStockQuantity : qty,
         purchaseUnit: pUnit,
         sellingUnit: sUnit,
         conversionFactor: conv,
-        unitDivision: division,
+        unitDivision: Math.max(1, Math.round(1 / minSellable)),
         minSellableQty: minSellable,
         pricing_mode: stockInPricingMode,
         sos_price: sosPriceVal,
-        buyPrice: buy,
-        sellPrice: sell,
+        buyPrice: calc.costPerSellingUnit,
+        sellPrice: effectiveSellPrice,
         supplierId: stockInSupplier || undefined,
         categoryId: stockInCat || undefined,
         minimumStock: min,
         management_mode: mMode,
-        source_quantity: mMode === 'pack_based' ? parseFloat(stockInSourceQty) : undefined,
-        source_unit: mMode === 'pack_based' ? stockInSourceUnit : undefined,
-        pack_count: mMode === 'pack_based' ? parseFloat(stockInPackCount) : undefined,
-        selling_pack_unit: mMode === 'pack_based' ? stockInSellingPackUnit : undefined,
-        container_unit: mMode === 'amount_based' ? stockInContainerUnit : undefined,
-        container_capacity_liters: mMode === 'amount_based' ? parseFloat(stockInContainerCapacity) : undefined,
-        batch_total_cost: mMode === 'amount_based' ? (parseFloat(stockInBatchCost) || buy) : undefined,
-        batch_reference: mMode === 'amount_based' ? stockInBatchRef : undefined,
-      }, `Alaab soo gashay: ${stockInProduct} +${qty} ${pUnit}`);
+        source_quantity: pType === 'loose' ? qty : (pType === 'carton' && stockInPackWeight ? cleanPrecision(calc.totalStockQuantity * parseFloat(stockInPackWeight)) : undefined),
+        source_unit: pType === 'loose' ? 'kg' : (pType === 'carton' ? 'carton' : undefined),
+        pack_count: pType === 'carton' || pType === 'loose' ? calc.totalStockQuantity : undefined,
+        selling_pack_unit: pType === 'carton' || pType === 'loose' ? sUnit : undefined,
+        container_unit: pType === 'liquid' ? stockInContainerUnit : undefined,
+        container_capacity_liters: pType === 'liquid' ? conv : undefined,
+        container_count: pType === 'liquid' ? qty : undefined,
+        batch_total_cost: pType === 'liquid' ? cleanPrecision(qty * buy) : calc.totalPurchaseCost,
+        total_purchase_cost: pType === 'liquid' ? cleanPrecision(qty * buy) : calc.totalPurchaseCost,
+        total_sellable_units: pType === 'liquid' ? cleanPrecision(qty * conv) : calc.totalStockQuantity,
+        cost_per_unit: pType === 'liquid' && (qty * conv) > 0 ? cleanPrecision((qty * buy) / (qty * conv)) : calc.costPerSellingUnit,
+        batch_reference: pType === 'liquid' ? (stockInBatchRef || `DUF-${Date.now().toString().slice(-4)}`) : undefined,
+        selling_options: pType === 'liquid' ? stockInOilMeasures : undefined,
+      }, `Alaab soo gashay (${pType}): ${stockInProduct} +${pType === 'liquid' ? (qty * conv) : calc.totalStockQuantity} ${sUnit}`);
 
-      success('Alaab cusub ayaa soo gashay!', `${stockInProduct} (${stockInVariant}) +${qty} ${pUnit}`);
+      success('Alaab cusub ayaa soo gashay!', `${stockInProduct} (${stockInVariant}): ${calc.totalStockQuantity} ${sUnit}`);
       setIsStockInOpen(false);
       setStockInProduct('');
       setStockInVariant('');
       setStockInQty('');
-      setStockInConv('');
-      setStockInDivision('1');
-      setStockInPricingMode('fixed');
-      setStockInSosPrice('');
       setStockInBuy('');
       setStockInSell('');
       setStockInMin('');
       setStockInSupplier('');
       setStockInCat('');
-      setStockInManagementMode('standard');
-      setStockInBatchCost('');
-      setStockInBatchRef('');
+      setStockInTotalBuy('');
+      selectStockInProductType('jawan');
       await loadData();
     } catch (err: any) {
       error('Khalad baa dhacay', err.message);
@@ -584,6 +693,30 @@ export default function ProductsPage() {
     setActiveActionMenuId(null);
   };
 
+  const stockInCalculation = calculateProductModel({
+    productType: stockInProductType,
+    purchaseQuantity: parseFloat(stockInQty) || 0,
+    costPerPurchaseUnit: parseFloat(stockInBuy) || 0,
+    totalPurchaseCost: stockInTotalBuy ? parseFloat(stockInTotalBuy) : undefined,
+    conversionValue: parseFloat(stockInConv) || 1,
+    loosePackMode: stockInLooseMode,
+    packContentWeight: parseFloat(stockInPackWeight) || undefined,
+    sellingPrice: stockInPricingMode === 'denomination' && stockInSosPrice ? calculateSosDenomination(parseFloat(stockInSosPrice) || 0).denominationUsd : (parseFloat(stockInSell) || 0),
+    minSellableQty: parseFloat(stockInMinSellableQty) || 1,
+  });
+
+  const editCalculation = calculateProductModel({
+    productType: editProductType,
+    purchaseQuantity: parseFloat(editIncomingQty) || 1,
+    costPerPurchaseUnit: parseFloat(editBuyPrice) || 0,
+    totalPurchaseCost: editTotalBuy ? parseFloat(editTotalBuy) : undefined,
+    conversionValue: parseFloat(editConversion) || 1,
+    loosePackMode: editLooseMode,
+    packContentWeight: parseFloat(editPackWeight) || undefined,
+    sellingPrice: editPricingMode === 'denomination' && editSosPrice ? calculateSosDenomination(parseFloat(editSosPrice) || 0).denominationUsd : (parseFloat(editSellPrice) || 0),
+    minSellableQty: parseFloat(editMinSellableQty) || 1,
+  });
+
   return (
     <AppShell title="Products">
       <div className="space-y-6">
@@ -606,12 +739,13 @@ export default function ProductsPage() {
                   setStockInProduct('');
                   setStockInVariant('');
                   setStockInQty('');
-                  setStockInConv('');
                   setStockInBuy('');
                   setStockInSell('');
                   setStockInMin('');
                   setStockInSupplier('');
                   setStockInCat('');
+                  setStockInTotalBuy('');
+                  selectStockInProductType('jawan');
                   setIsStockInOpen(true);
                 }}
                 className="font-bold flex items-center gap-2 shadow-md shadow-emerald-600/20 bg-emerald-600 hover:bg-emerald-700 text-white"
@@ -715,7 +849,7 @@ export default function ProductsPage() {
                   variants.map((v, index) => {
                     const rowNumber = (currentPage - 1) * pageSize + index + 1;
                     const status = getStockStatus(v.stock_quantity, v.minimum_stock, v.is_pending);
-                    const costPerBase = calculateCostPerBaseUnit(v.buy_price, v.conversion_factor);
+                    const costPerBase = v.cost_per_unit || calculateCostPerBaseUnit(v.buy_price, v.conversion_factor, v);
                     const unitProfit = calculateUnitProfit(v.sell_price, costPerBase);
 
                     return (
@@ -758,23 +892,38 @@ export default function ProductsPage() {
                                 {v.source_quantity}{v.source_unit} ÷ {v.pack_count} {v.selling_pack_unit || 'Bac'} ({calculatePackRatio(v.source_quantity || 500, v.pack_count || 10).qtyPerPack}{v.source_unit || 'g'}/Bac)
                               </span>
                             )}
-                            {v.management_mode === 'amount_based' && (
-                              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/60 px-1.5 py-0.5 rounded border border-amber-200/60">
-                                <Droplets className="h-3 w-3" />
-                                {v.container_capacity_liters || 20}L / {v.container_unit || 'Caag'}
-                              </span>
+                            {(v.management_mode === 'amount_based' || v.selling_unit === 'liter') && (
+                              <div className="flex flex-col gap-1 items-start mt-0.5">
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/60 px-1.5 py-0.5 rounded border border-amber-200/60">
+                                  <Droplets className="h-3 w-3" />
+                                  {v.container_capacity_liters || 20}L / {v.container_unit || 'Caag'}
+                                </span>
+                                <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                                  <span className="text-[10px] font-bold text-slate-500">Cabbirrada:</span>
+                                  {(v.selling_options && v.selling_options.length > 0 
+                                    ? v.selling_options 
+                                    : getDefaultOilSellingMeasures(v.sell_price || 1.85)
+                                  ).map((m: any, idx: number) => (
+                                    <span key={m.code || idx} className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-800">
+                                      {m.name || m.label}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
                             )}
                           </div>
                         </td>
 
                         <td className="px-4 py-4 text-right font-mono text-slate-600 dark:text-slate-300">
-                          {formatMoney(v.buy_price)}
-                          <span className="text-[11px] text-slate-400 ml-1">/{v.purchase_unit}</span>
-                          {v.conversion_factor > 1 && (
-                            <p className="text-[10px] text-slate-400">
-                              (Cost: {formatUnitMoney(costPerBase)}/{v.selling_unit})
-                            </p>
+                          {v.buy_price > 0 && (
+                            <div>
+                              <span className="font-semibold text-slate-800 dark:text-slate-200">{formatMoney(v.buy_price)}</span>
+                              <span className="text-[11px] text-slate-400 ml-1">/{v.purchase_unit}</span>
+                            </div>
                           )}
+                          <p className="text-[10px] text-slate-500 font-medium">
+                            Cost: {formatUnitMoney(costPerBase)}/{v.selling_unit}
+                          </p>
                         </td>
 
                         <td className="px-4 py-4 text-right font-mono font-bold text-slate-900 dark:text-white">
@@ -788,13 +937,16 @@ export default function ProductsPage() {
                               <span className="text-[10px] block font-normal text-slate-400">
                                 Mode A ({formatMoney(v.sell_price)})
                               </span>
+                              <p className={`text-[10px] font-bold ${unitProfit < 0 ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                                {unitProfit < 0 ? '-' : '+'}{formatUnitMoney(Math.abs(unitProfit))} {unitProfit < 0 ? 'khasaare' : "faa'iido"}
+                              </p>
                             </div>
                           ) : (
                             <>
                               {formatUnitMoney(v.sell_price)}
                               <span className="text-[11px] text-slate-400 ml-1 font-normal">/{v.selling_unit}</span>
-                              <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-normal">
-                                +{formatUnitMoney(unitProfit)} faa'iido
+                              <p className={`text-[10px] font-bold ${unitProfit < 0 ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                                {unitProfit < 0 ? '-' : '+'}{formatUnitMoney(Math.abs(unitProfit))} {unitProfit < 0 ? 'khasaare' : "faa'iido"}
                               </p>
                             </>
                           )}
@@ -823,11 +975,14 @@ export default function ProductsPage() {
                               ≈ {(v.stock_quantity / v.conversion_factor).toFixed(1)} {v.purchase_unit}
                             </p>
                           )}
-                          {v.unit_division && v.unit_division > 1 && (
-                            <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-mono font-bold">
-                              Min: {v.min_sellable_qty || (1 / v.unit_division)} {v.selling_unit}
+                          {v.management_mode === 'pack_based' && v.source_quantity && v.pack_count && (
+                            <p className="text-[10px] text-blue-600 dark:text-blue-400 font-mono">
+                              ≈ {cleanPrecision((v.stock_quantity * (v.source_quantity / v.pack_count)) / (v.source_unit === 'g' ? 1000 : 1))} KG
                             </p>
                           )}
+                          <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-mono font-bold">
+                            Min: {v.min_sellable_qty || (v.unit_division && v.unit_division > 1 ? (1 / v.unit_division) : 1)} {v.selling_unit}
+                          </p>
                         </td>
 
                         {/* Actions Menu */}
@@ -903,6 +1058,18 @@ export default function ProductsPage() {
                                           setStockInConv(String(v.conversion_factor ?? ''));
                                           setStockInSupplier(v.supplier_id || '');
                                           setStockInManagementMode(v.management_mode || 'standard');
+                                          let pt: ShopProductType = 'jawan';
+                                          if (v.management_mode === 'amount_based' || v.selling_unit === 'liter' || v.purchase_unit === 'caag') {
+                                            pt = 'liquid';
+                                          } else if (v.purchase_unit === 'carton') {
+                                            pt = 'carton';
+                                          } else if (v.management_mode === 'pack_based') {
+                                            pt = 'loose';
+                                          } else if (v.purchase_unit === 'jawan' || v.selling_unit === 'kg') {
+                                            pt = 'jawan';
+                                          }
+                                          setStockInProductType(pt);
+                                          setStockInMinSellableQty(String(v.min_sellable_qty || (v.unit_division && v.unit_division > 1 ? (1 / v.unit_division) : 1)));
                                           setIsStockInOpen(true);
                                           setActiveActionMenuId(null);
                                         }}
@@ -1004,403 +1171,761 @@ export default function ProductsPage() {
         </DialogHeader>
 
         <DialogBody className="space-y-4 text-xs">
-          {/* Model Selector Tabs */}
+          {/* STEP 1: PRODUCT MODEL SELECTOR (4 CARDS) */}
           <div>
-            <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
-              Habka Maareynta Alaabta (Product Management Model) *
+            <label className="font-black text-slate-800 dark:text-slate-200 block mb-1.5 text-xs">
+              1. Sidee ayay alaabtani ku timaadaa dukaanka? (How does this product arrive?) *
             </label>
-            <div className="grid grid-cols-3 gap-2 p-1 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {/* 1. Jawan / Sack */}
               <button
                 type="button"
-                onClick={() => setStockInManagementMode('standard')}
-                className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-bold transition-all ${
-                  stockInManagementMode === 'standard'
-                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                onClick={() => selectStockInProductType('jawan')}
+                className={`flex flex-col items-start p-2.5 rounded-xl border text-left transition-all ${
+                  stockInProductType === 'jawan'
+                    ? 'border-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200 ring-2 ring-emerald-500/20 shadow-xs'
+                    : 'border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-slate-700 dark:text-slate-300'
                 }`}
               >
-                <Package className="h-3.5 w-3.5 text-emerald-600" />
-                <span>Standard (Caadi)</span>
+                <div className="flex items-center gap-1.5 mb-1">
+                  <Package className="h-4 w-4 text-emerald-600" />
+                  <span className="font-bold text-xs">Kiish / Jawan</span>
+                </div>
+                <p className="text-[10px] text-slate-500 leading-tight">Bariis, Bur, Sokor (KG lagu iibiyo)</p>
               </button>
 
+              {/* 2. Liquid / Liter */}
               <button
                 type="button"
-                onClick={() => {
-                  setStockInManagementMode('pack_based');
-                  setStockInSUnit('bac');
-                  setStockInPUnit('g');
-                }}
-                className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-bold transition-all ${
-                  stockInManagementMode === 'pack_based'
-                    ? 'bg-blue-600 text-white shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                onClick={() => selectStockInProductType('liquid')}
+                className={`flex flex-col items-start p-2.5 rounded-xl border text-left transition-all ${
+                  stockInProductType === 'liquid'
+                    ? 'border-amber-600 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 ring-2 ring-amber-500/20 shadow-xs'
+                    : 'border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-slate-700 dark:text-slate-300'
                 }`}
               >
-                <Boxes className="h-3.5 w-3.5" />
-                <span>Pack-based (Bac / Xawaaji)</span>
+                <div className="flex items-center gap-1.5 mb-1">
+                  <Droplets className="h-4 w-4 text-amber-600" />
+                  <span className="font-bold text-xs">Dareere / Saliid</span>
+                </div>
+                <p className="text-[10px] text-slate-500 leading-tight">Saliid, Weelal (Litir lagu iibiyo)</p>
               </button>
 
+              {/* 3. Carton / Pack */}
               <button
                 type="button"
-                onClick={() => {
-                  setStockInManagementMode('amount_based');
-                  setStockInSUnit('liter');
-                  setStockInPUnit('caag');
-                  setStockInConv('20');
-                }}
-                className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-bold transition-all ${
-                  stockInManagementMode === 'amount_based'
-                    ? 'bg-amber-600 text-white shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                onClick={() => selectStockInProductType('carton')}
+                className={`flex flex-col items-start p-2.5 rounded-xl border text-left transition-all ${
+                  stockInProductType === 'carton'
+                    ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/40 text-blue-900 dark:text-blue-200 ring-2 ring-blue-500/20 shadow-xs'
+                    : 'border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-slate-700 dark:text-slate-300'
                 }`}
               >
-                <Droplets className="h-3.5 w-3.5" />
-                <span>Amount-based (Saliid / Oil)</span>
+                <div className="flex items-center gap-1.5 mb-1">
+                  <Boxes className="h-4 w-4 text-blue-600" />
+                  <span className="font-bold text-xs">Kartoon / Pack</span>
+                </div>
+                <p className="text-[10px] text-slate-500 leading-tight">Basto, Buskud (Bac/Pack lagu iibiyo)</p>
+              </button>
+
+              {/* 4. Loose / Bulk */}
+              <button
+                type="button"
+                onClick={() => selectStockInProductType('loose')}
+                className={`flex flex-col items-start p-2.5 rounded-xl border text-left transition-all ${
+                  stockInProductType === 'loose'
+                    ? 'border-purple-600 bg-purple-50 dark:bg-purple-950/40 text-purple-900 dark:text-purple-200 ring-2 ring-purple-500/20 shadow-xs'
+                    : 'border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-slate-700 dark:text-slate-300'
+                }`}
+              >
+                <div className="flex items-center gap-1.5 mb-1">
+                  <Scale className="h-4 w-4 text-purple-600" />
+                  <span className="font-bold text-xs">Shub-shub / Bulk</span>
+                </div>
+                <p className="text-[10px] text-slate-500 leading-tight">Xawaaji, Budo (KG loo qeybiyo Bac)</p>
               </button>
             </div>
           </div>
 
+          {stockInProductType === 'liquid' ? (
+            <div className="space-y-4">
+              {/* DEDICATED SIMPLE COOKING OIL REGISTRATION FLOW */}
+              <div className="bg-amber-50/70 dark:bg-amber-950/30 p-4 rounded-2xl border border-amber-200 dark:border-amber-900/60 space-y-4">
+                <div className="flex items-center justify-between border-b border-amber-200 dark:border-amber-900/40 pb-2.5">
+                  <div className="flex items-center gap-2">
+                    <Droplets className="h-5 w-5 text-amber-600" />
+                    <div>
+                      <h3 className="font-black text-sm text-slate-900 dark:text-white">
+                        Diiwaangelinta Saliidda (Cooking Oil Registration)
+                      </h3>
+                      <p className="text-[11px] text-slate-500">
+                        Geli kaliya xogta dhabta ah ee aad taqaanno: Caag, Litir & Qiimayaasha
+                      </p>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-bold font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200 border border-amber-300">
+                    Caag → Litir & Cabbirro
+                  </span>
+                </div>
+
+                {/* 1. Magaca Saliidda & Variant */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="font-bold text-slate-800 dark:text-slate-200 block mb-1">
+                      A. Magaca Saliidda *
+                    </label>
+                    <Input
+                      placeholder="Saliid"
+                      value={stockInProduct}
+                      onChange={(e) => setStockInProduct(e.target.value)}
+                      className="font-bold"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="font-bold text-slate-800 dark:text-slate-200 block mb-1">
+                      Nooca / Variant Name
+                    </label>
+                    <Input
+                      placeholder="Caag 20L"
+                      value={stockInVariant}
+                      onChange={(e) => setStockInVariant(e.target.value)}
+                      className="font-bold"
+                    />
+                  </div>
+                </div>
+
+                {/* 2. Real-world Inputs: Caag, Litir/Caag, Qiimaha/Caag, Qiimaha 1 Liter */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {/* B. Tirada Caagga la keenay */}
+                  <div>
+                    <label className="font-bold text-slate-800 dark:text-slate-200 block mb-1">
+                      B. Tirada Caagga *
+                    </label>
+                    <Input
+                      type="number"
+                      step="1"
+                      min="1"
+                      placeholder="3"
+                      value={stockInQty}
+                      onChange={(e) => setStockInQty(e.target.value)}
+                      className="font-mono font-bold text-slate-900 dark:text-white"
+                    />
+                    <p className="text-[10px] text-slate-400 mt-0.5">Tusaale: 3 Caag</p>
+                  </div>
+
+                  {/* C. Liter-ka halkii Caag */}
+                  <div>
+                    <label className="font-bold text-slate-800 dark:text-slate-200 block mb-1">
+                      C. Liter halkii Caag *
+                    </label>
+                    <Input
+                      type="number"
+                      step="0.1"
+                      min="0.1"
+                      placeholder="20"
+                      value={stockInConv}
+                      onChange={(e) => {
+                        setStockInConv(e.target.value);
+                        setStockInContainerCapacity(e.target.value);
+                      }}
+                      className="font-mono font-bold text-amber-700 dark:text-amber-400"
+                    />
+                    <p className="text-[10px] text-slate-400 mt-0.5">Tusaale: 20 Liter</p>
+                  </div>
+
+                  {/* D. Qiimaha halkii Caag */}
+                  <div>
+                    <label className="font-bold text-slate-800 dark:text-slate-200 block mb-1">
+                      D. Qiimaha hal Caag ($) *
+                    </label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      placeholder="29.70"
+                      value={stockInBuy}
+                      onChange={(e) => setStockInBuy(e.target.value)}
+                      className="font-mono font-bold text-emerald-700 dark:text-emerald-400"
+                    />
+                    <p className="text-[10px] text-slate-400 mt-0.5">Tusaale: $29.70</p>
+                  </div>
+
+                  {/* E. Qiimaha lagu iibiyo 1 Liter */}
+                  <div>
+                    <label className="font-bold text-slate-800 dark:text-slate-200 block mb-1">
+                      E. Qiimaha 1 Liter ($) *
+                    </label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      placeholder="1.85"
+                      value={stockInSell}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setStockInSell(val);
+                        const p = parseFloat(val);
+                        if (!isNaN(p) && p > 0) {
+                          setStockInOilMeasures(prev => prev.map(m => m.code === '1L' ? { ...m, display_price: p, payment_price: p } : m));
+                        }
+                      }}
+                      className="font-mono font-black text-emerald-700 dark:text-emerald-400 text-sm"
+                    />
+                    <p className="text-[10px] text-slate-400 mt-0.5">Tusaale: $1.85</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* READ-ONLY CALCULATION SUMMARY */}
+              {(() => {
+                const cReg = calculateCookingOilRegistration({
+                  containers: parseFloat(stockInQty) || 0,
+                  litersPerContainer: parseFloat(stockInConv) || 0,
+                  purchasePricePerContainer: parseFloat(stockInBuy) || 0,
+                  sellingPricePerLiter: parseFloat(stockInSell) || 0,
+                  customMeasures: stockInOilMeasures,
+                });
+
+                return (
+                  <div className="p-3.5 bg-slate-100/90 dark:bg-slate-800/80 rounded-2xl border border-slate-200 dark:border-slate-700 space-y-2">
+                    <div className="flex items-center justify-between text-xs font-bold text-slate-700 dark:text-slate-300">
+                      <span>Xisaabinta Tooska ah (Derived Values - Read-only):</span>
+                      <span className="font-mono text-[11px] text-slate-500">
+                        {cReg.containers} Caag × {cReg.litersPerContainer}L = {cReg.totalStockLiters} L
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
+                      {/* Stock */}
+                      <div className="bg-white dark:bg-slate-900 p-2.5 rounded-xl border border-slate-200 dark:border-slate-800">
+                        <span className="text-[10px] uppercase font-sans text-slate-500 font-bold block">Stock</span>
+                        <span className="text-base font-black text-slate-900 dark:text-white">
+                          {cReg.totalStockLiters} L
+                        </span>
+                        <span className="text-[10px] text-slate-400 font-sans block mt-0.5">
+                          {cReg.containers} Caag × {cReg.litersPerContainer}L
+                        </span>
+                      </div>
+
+                      {/* Total Cost */}
+                      <div className="bg-white dark:bg-slate-900 p-2.5 rounded-xl border border-slate-200 dark:border-slate-800">
+                        <span className="text-[10px] uppercase font-sans text-slate-500 font-bold block">Total Cost</span>
+                        <span className="text-base font-black text-slate-800 dark:text-slate-200">
+                          ${cReg.totalPurchaseCost.toFixed(2)}
+                        </span>
+                        <span className="text-[10px] text-slate-400 font-sans block mt-0.5">
+                          {cReg.containers} × ${cReg.purchasePricePerContainer.toFixed(2)}
+                        </span>
+                      </div>
+
+                      {/* Cost / Liter */}
+                      <div className="bg-white dark:bg-slate-900 p-2.5 rounded-xl border border-slate-200 dark:border-slate-800">
+                        <span className="text-[10px] uppercase font-sans text-slate-500 font-bold block">Cost / Liter</span>
+                        <span className="text-base font-black text-amber-700 dark:text-amber-400">
+                          ${cReg.costPerLiter.toFixed(3)}
+                        </span>
+                        <span className="text-[10px] text-slate-400 font-sans block mt-0.5">
+                          ${cReg.totalPurchaseCost.toFixed(2)} ÷ {cReg.totalStockLiters}L
+                        </span>
+                      </div>
+
+                      {/* Profit / Liter */}
+                      <div className={`p-2.5 rounded-xl border ${
+                        cReg.isLoss 
+                          ? 'bg-red-50 dark:bg-red-950/60 border-red-300 text-red-900 dark:text-red-200' 
+                          : 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-300 text-emerald-900 dark:text-emerald-200'
+                      }`}>
+                        <span className={`text-[10px] uppercase font-sans font-bold block ${cReg.isLoss ? 'text-red-700 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'}`}>
+                          {cReg.isLoss ? 'Khasaare / Liter' : 'Profit / Liter'}
+                        </span>
+                        <span className={`text-base font-black ${cReg.isLoss ? 'text-red-600' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                          {cReg.profitPerLiter >= 0 ? '+' : ''}${cReg.profitPerLiter.toFixed(3)}
+                        </span>
+                        <span className="text-[10px] font-sans block mt-0.5 opacity-80">
+                          ${cReg.sellingPricePerLiter.toFixed(2)} - ${cReg.costPerLiter.toFixed(3)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* SECTION 3: CABBIRRADA SALIIDDA (SELLING MEASURES CARDS) */}
+              <div className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="font-black text-slate-900 dark:text-white text-xs">
+                      Cabbirrada Saliidda (Selling Measures)
+                    </h4>
+                    <p className="text-[11px] text-slate-500">
+                      7-da cabbir ee xaqiijisan iyo xidhiidhka ka dhexeeya:
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowStockInOilMeasureConfig(!showStockInOilMeasureConfig)}
+                    className="text-xs font-bold text-amber-700 dark:text-amber-400 hover:underline"
+                  >
+                    {showStockInOilMeasureConfig ? 'Qari Habeynta' : 'Habee Litirrada & Qiimaha'}
+                  </button>
+                </div>
+
+                {/* 7 CARDS SHOWING CONFIRMED HIERARCHY */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2">
+                  {stockInOilMeasures.map((m, idx) => (
+                    <div
+                      key={m.code || idx}
+                      className="p-2.5 rounded-xl border border-amber-200/80 dark:border-amber-900/60 bg-amber-50/40 dark:bg-amber-950/20 text-center flex flex-col justify-between"
+                    >
+                      <div>
+                        <span className="font-black text-slate-900 dark:text-white text-xs block">
+                          {m.name}
+                        </span>
+                        <span className="text-[10px] text-slate-500 font-medium block leading-tight mt-0.5">
+                          {m.description}
+                        </span>
+                      </div>
+                      <div className="mt-2 pt-1 border-t border-amber-200/60 dark:border-amber-900/40">
+                        <span className="text-xs font-black font-mono text-emerald-700 dark:text-emerald-400 block">
+                          ${m.display_price.toFixed(2)}
+                        </span>
+                        <span className="text-[10px] font-mono text-slate-400 block">
+                          {m.quantity_liters} L
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* OPTIONAL EXPANDABLE CONFIGURATION TABLE FOR EXACT NUMERIC LITERS */}
+                {showStockInOilMeasureConfig && (
+                  <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                    <p className="text-[11px] font-semibold text-slate-600 dark:text-slate-400">
+                      Wax ka beddel xaddiga saxda ah ee Litirrada ama Qiimaha iibka ee cabbir kasta:
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                      {stockInOilMeasures.map((m, idx) => (
+                        <div key={m.code || idx} className="flex items-center justify-between gap-2 p-2 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700">
+                          <div className="min-w-24">
+                            <span className="font-bold text-slate-800 dark:text-slate-200 block">{m.name}</span>
+                            <span className="text-[10px] text-slate-400">{m.description}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <div className="w-20">
+                              <label className="text-[9px] text-slate-400 block">Litir:</label>
+                              <Input
+                                type="number"
+                                step="0.0001"
+                                min="0.0001"
+                                value={m.quantity_liters}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value) || 0;
+                                  setStockInOilMeasures(prev => prev.map((item, i) => i === idx ? { ...item, quantity_liters: val } : item));
+                                }}
+                                className="h-7 text-xs font-mono font-bold"
+                              />
+                            </div>
+                            <div className="w-20">
+                              <label className="text-[9px] text-slate-400 block">Qiimo $:</label>
+                              <Input
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                value={m.display_price}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value) || 0;
+                                  setStockInOilMeasures(prev => prev.map((item, i) => i === idx ? { ...item, display_price: val, payment_price: val } : item));
+                                }}
+                                className="h-7 text-xs font-mono font-bold text-emerald-700"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* STEP 2: PRODUCT IDENTIFICATION */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="font-bold text-slate-700 dark:text-slate-300">Magaca Alaabta *</label>
+              <label className="font-bold text-slate-700 dark:text-slate-300">Magaca Alaabta (Product Name) *</label>
               <Input
-                placeholder="Tusaale: Xawaaji / Cooking Oil / Bariis"
+                placeholder="Tusaale: Bur Dahab, Basto MK, Saliid Macsar, Xawaaji..."
                 value={stockInProduct}
                 onChange={(e) => setStockInProduct(e.target.value)}
-                className="mt-1"
+                className="mt-1 font-bold"
               />
             </div>
             <div>
               <label className="font-bold text-slate-700 dark:text-slate-300">Nooca / Variant *</label>
               <Input
-                placeholder="Tusaale: Bac yar, 20L Caag, 50kg..."
+                placeholder="Tusaale: 25KG, MK, 20L Caag, Bac 50g..."
                 value={stockInVariant}
                 onChange={(e) => setStockInVariant(e.target.value)}
-                className="mt-1"
+                className="mt-1 font-bold"
               />
             </div>
           </div>
 
-          {/* Conditional Form Sections Based on Management Model */}
-          {stockInManagementMode === 'pack_based' ? (
-            /* 1. PACK-BASED (POWDER / SPICES / SMALL BAGS) FORM */
-            <div className="bg-blue-50/70 dark:bg-blue-950/40 p-3.5 rounded-xl border border-blue-200 dark:border-blue-800/60 space-y-3">
-              <div className="flex items-center gap-2 text-blue-900 dark:text-blue-300 font-black">
-                <Boxes className="h-4 w-4 text-blue-600" />
-                <span>Habka Qaybinta Baakadaha (Pack-Based Configuration)</span>
+          {/* STEP 3: PURCHASE SECTION (QAYBTA SOO GADASHADA) */}
+          <div className="bg-slate-50/80 dark:bg-slate-800/40 p-3 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
+            <div className="flex items-center justify-between text-slate-800 dark:text-slate-200 font-bold">
+              <span>Qaybta Soo Gadashada (Purchase Details)</span>
+              {stockInQty && stockInBuy && (
+                <span className="text-[11px] font-mono text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-200/60">
+                  Wadarta: {stockInQty} × ${stockInBuy} = ${(Number(stockInQty) * Number(stockInBuy)).toFixed(2)}
+                </span>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300">
+                  Tirada Aad Soo Iisatay (Quantity) *
+                </label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  placeholder="Tusaale: 5, 2, 4..."
+                  value={stockInQty}
+                  onChange={(e) => setStockInQty(e.target.value)}
+                  className="mt-1 font-mono font-bold text-slate-900 dark:text-white"
+                />
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Tirada Guud ee Soo Gashay *</label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    placeholder="500"
-                    value={stockInSourceQty}
-                    onChange={(e) => setStockInSourceQty(e.target.value)}
-                    className="mt-1 font-mono font-bold"
-                  />
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Halbeegga Asalka *</label>
-                  <select
-                    value={stockInSourceUnit}
-                    onChange={(e) => setStockInSourceUnit(e.target.value)}
-                    className="mt-1 flex h-9 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs font-bold"
-                  >
-                    <option value="g">Gram (g)</option>
-                    <option value="kg">KG</option>
-                    <option value="pcs">PCS</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Tirada Bacaha Loo Qaybiyey *</label>
-                  <Input
-                    type="number"
-                    min="1"
-                    step="1"
-                    placeholder="10"
-                    value={stockInPackCount}
-                    onChange={(e) => setStockInPackCount(e.target.value)}
-                    className="mt-1 font-mono font-bold text-blue-700"
-                  />
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Halbeegga Iibka *</label>
-                  <Input
-                    value={stockInSellingPackUnit}
-                    onChange={(e) => setStockInSellingPackUnit(e.target.value)}
-                    placeholder="bac"
-                    className="mt-1 font-bold"
-                  />
-                </div>
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300">
+                  Halbeegga Soo Galka (Purchase Unit) *
+                </label>
+                <select
+                  value={stockInPUnit}
+                  onChange={(e) => setStockInPUnit(e.target.value)}
+                  className="mt-1 flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-xs font-bold"
+                >
+                  {ALLOWED_INCOMING_UNITS.map(u => (
+                    <option key={u.value} value={u.value}>{u.label}</option>
+                  ))}
+                  {!ALLOWED_INCOMING_UNITS.some(u => u.value === stockInPUnit) && (
+                    <option value={stockInPUnit}>{stockInPUnit}</option>
+                  )}
+                </select>
               </div>
 
-              {/* Dynamic Real-time Calculation Display */}
-              <div className="p-2.5 bg-white dark:bg-slate-900 rounded-lg border border-blue-200 dark:border-blue-800 text-xs flex items-center justify-between">
-                <div>
-                  <span className="text-slate-500 font-medium">Qiyaasta 1 {stockInSellingPackUnit.toUpperCase()}: </span>
-                  <strong className="text-blue-700 dark:text-blue-300 font-mono text-sm">
-                    {calculatePackRatio(Number(stockInSourceQty), Number(stockInPackCount)).qtyPerPack} {stockInSourceUnit}
-                  </strong>
-                </div>
-                <Badge variant="outline" className="bg-blue-50 dark:bg-blue-950 font-mono text-blue-800 dark:text-blue-200 border-blue-300">
-                  Kaydka: {stockInPackCount} {stockInSellingPackUnit.toUpperCase()}
-                </Badge>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3 pt-2 border-t border-blue-200/60 dark:border-blue-800/60">
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Qiimaha Soo Iibka Guud ($)</label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    placeholder="0.00"
-                    value={stockInBuy}
-                    onChange={(e) => setStockInBuy(e.target.value)}
-                    className="mt-1 font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Qiimaha Iibinta Halkii {stockInSellingPackUnit.toUpperCase()} ($) *</label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    placeholder="0.10"
-                    value={stockInSell}
-                    onChange={(e) => setStockInSell(e.target.value)}
-                    className="mt-1 font-mono font-black text-emerald-700 dark:text-emerald-300"
-                  />
-                </div>
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300">
+                  {stockInPUnit.toLowerCase() === 'jawan' 
+                    ? 'Qiimaha Hal Jawan ($) *' 
+                    : (stockInPUnit.toLowerCase() === 'caag' 
+                        ? 'Qiimaha Hal Caag ($) *' 
+                        : (stockInPUnit.toLowerCase() === 'carton' 
+                            ? 'Qiimaha Hal Carton ($) *' 
+                            : (stockInPUnit.toLowerCase() === 'kg' 
+                                ? 'Qiimaha Hal KG ($) *' 
+                                : `Qiimaha Hal ${stockInPUnit} ($) *`)))}
+                </label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  placeholder="0.00"
+                  value={stockInBuy}
+                  onChange={(e) => setStockInBuy(e.target.value)}
+                  className="mt-1 font-mono font-bold text-emerald-700 dark:text-emerald-300"
+                />
+                <p className="text-[10px] text-slate-400 mt-0.5">
+                  Qiimaha hal {stockInPUnit} kugu kacay (alaab-qeybiyaha)
+                </p>
               </div>
             </div>
-          ) : stockInManagementMode === 'amount_based' ? (
-            /* 2. AMOUNT-BASED (COOKING OIL BATCHES) FORM */
-            <div className="bg-amber-50/70 dark:bg-amber-950/40 p-3.5 rounded-xl border border-amber-200 dark:border-amber-800/60 space-y-3">
-              <div className="flex items-center gap-2 text-amber-900 dark:text-amber-300 font-black">
-                <Droplets className="h-4 w-4 text-amber-600" />
-                <span>Dufcadda Saliidda & Kaydka Litirka (Oil Batch Setup)</span>
-              </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Tirada Caagagga *</label>
-                  <Input
-                    type="number"
-                    min="1"
-                    step="1"
-                    placeholder="4"
-                    value={stockInContainerCount}
-                    onChange={(e) => setStockInContainerCount(e.target.value)}
-                    className="mt-1 font-mono font-bold"
-                  />
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Halbeegga Weelka *</label>
-                  <select
-                    value={stockInContainerUnit}
-                    onChange={(e) => setStockInContainerUnit(e.target.value)}
-                    className="mt-1 flex h-9 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs font-bold"
-                  >
-                    <option value="caag">Caag (Jerrycan)</option>
-                    <option value="drum">Drum / Foosto</option>
-                    <option value="dhalo">Dhalo</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Litir / Weelkii *</label>
-                  <Input
-                    type="number"
-                    step="0.1"
-                    placeholder="20"
-                    value={stockInContainerCapacity}
-                    onChange={(e) => setStockInContainerCapacity(e.target.value)}
-                    className="mt-1 font-mono font-bold text-amber-700"
-                  />
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Qiimaha Dufcadda ($) *</label>
+            {/* If Loose: support entering total cost directly if known */}
+            {stockInProductType === 'loose' && (
+              <div className="pt-2 border-t border-slate-200 dark:border-slate-700/60 flex items-center justify-between text-[11px]">
+                <span className="text-slate-600 dark:text-slate-400">
+                  Miyaad haysataa qiimaha guud ee dhammaan KG-yada? (Optional Total Cost):
+                </span>
+                <div className="flex items-center gap-1.5 w-36">
                   <Input
                     type="number"
                     step="0.01"
-                    placeholder="32.00"
-                    value={stockInBatchCost}
-                    onChange={(e) => {
-                      setStockInBatchCost(e.target.value);
-                      setStockInBuy(e.target.value);
-                    }}
-                    className="mt-1 font-mono font-bold text-emerald-700"
+                    placeholder="Wadarta $"
+                    value={stockInTotalBuy}
+                    onChange={(e) => setStockInTotalBuy(e.target.value)}
+                    className="h-7 text-xs font-mono"
                   />
                 </div>
               </div>
+            )}
+          </div>
 
-              {/* Realtime Oil Batch Summary Banner */}
-              <div className="p-2.5 bg-white dark:bg-slate-900 rounded-lg border border-amber-200 dark:border-amber-800 text-xs flex items-center justify-between">
-                <div>
-                  <span className="text-slate-500 font-medium">Kaydka Litirka: </span>
-                  <strong className="text-emerald-700 dark:text-emerald-300 font-mono text-sm">
-                    {Number(stockInContainerCount || 1) * Number(stockInContainerCapacity || 20)} Liter
-                  </strong>
-                </div>
-                <div>
-                  <span className="text-slate-500 font-medium">Cost per Liter: </span>
-                  <strong className="text-amber-700 dark:text-amber-300 font-mono text-sm">
-                    ${calculateBatchCostPerUnit(Number(stockInBatchCost || 0), Number(stockInContainerCount || 1) * Number(stockInContainerCapacity || 20)).toFixed(4)}/L
-                  </strong>
-                </div>
-              </div>
+          {/* STEP 4: CONVERSION SECTION (QAYBTA ISKU BEDDELKA) */}
+          <div className="bg-slate-50/80 dark:bg-slate-800/40 p-3 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
+            <span className="font-bold text-slate-800 dark:text-slate-200 block">
+              Qaybta Isku Beddelka (Conversion Setup)
+            </span>
 
-              <div className="grid grid-cols-2 gap-3 pt-2 border-t border-amber-200/60 dark:border-amber-800/60">
+            {stockInProductType === 'jawan' && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
                 <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Tixraaca Dufcadda (Batch Ref)</label>
-                  <Input
-                    placeholder="DUF-001"
-                    value={stockInBatchRef}
-                    onChange={(e) => setStockInBatchRef(e.target.value)}
-                    className="mt-1 font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Qiimaha Baseline ($/L)</label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    placeholder="0.50"
-                    value={stockInSell}
-                    onChange={(e) => setStockInSell(e.target.value)}
-                    className="mt-1 font-mono"
-                  />
-                </div>
-              </div>
-            </div>
-          ) : (
-            /* 3. STANDARD (PCS / CARTON / JAWAN / KG) FORM */
-            <div className="space-y-4">
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Tirada Soo Gashay *</label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    placeholder=""
-                    value={stockInQty}
-                    onChange={(e) => setStockInQty(e.target.value)}
-                    className="mt-1 font-mono font-bold"
-                  />
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Halbeegga Soo Galka *</label>
-                  <select
-                    value={stockInPUnit}
-                    onChange={(e) => setStockInPUnit(e.target.value)}
-                    className="mt-1 flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-xs font-bold"
-                  >
-                    {ALLOWED_INCOMING_UNITS.map(u => (
-                      <option key={u.value} value={u.value}>{u.label}</option>
-                    ))}
-                    {!ALLOWED_INCOMING_UNITS.some(u => u.value === stockInPUnit) && (
-                      <option value={stockInPUnit}>{stockInPUnit}</option>
-                    )}
-                  </select>
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Qiimaha Soo Iibka ($)</label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    placeholder=""
-                    value={stockInBuy}
-                    onChange={(e) => setStockInBuy(e.target.value)}
-                    className="mt-1 font-mono"
-                  />
-                </div>
-              </div>
-
-              <div className="bg-slate-50 dark:bg-slate-800/40 p-3 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
-                <div className="grid grid-cols-3 gap-3">
-                  <div>
-                    <label className="font-medium text-slate-600 dark:text-slate-400">1 {stockInPUnit.toUpperCase()} =</label>
+                  <label className="font-medium text-slate-700 dark:text-slate-300">
+                    1 Jawan intee KG ayuu ka kooban yahay? *
+                  </label>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="font-mono font-bold text-xs text-slate-500">1 Jawan =</span>
                     <Input
                       type="number"
-                      placeholder="50"
+                      step="0.1"
+                      placeholder="25"
                       value={stockInConv}
                       onChange={(e) => setStockInConv(e.target.value)}
-                      className="mt-1 font-mono font-bold"
+                      className="font-mono font-bold w-28 text-emerald-700"
                     />
+                    <span className="font-bold text-xs text-slate-700 dark:text-slate-300">KG</span>
+                  </div>
+                </div>
+                <div className="text-[11px] text-slate-500 bg-white dark:bg-slate-900 p-2.5 rounded-lg border border-slate-200 dark:border-slate-700">
+                  <p>Kaydka Guud ee Dukaanka: <strong className="text-slate-900 dark:text-white font-mono">{stockInCalculation.totalStockQuantity} KG</strong></p>
+                  <p>Cost/KG Toos ah: <strong className="text-emerald-700 dark:text-emerald-400 font-mono">${stockInCalculation.costPerSellingUnit.toFixed(3)}/KG</strong></p>
+                </div>
+              </div>
+            )}
+
+            {stockInProductType === 'carton' && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+                  <div>
+                    <label className="font-medium text-slate-700 dark:text-slate-300">
+                      1 Carton intee Bac/Baakad ayuu ka kooban yahay? *
+                    </label>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className="font-mono font-bold text-xs text-slate-500">1 Carton =</span>
+                      <Input
+                        type="number"
+                        step="1"
+                        placeholder="20"
+                        value={stockInConv}
+                        onChange={(e) => setStockInConv(e.target.value)}
+                        className="font-mono font-bold w-28 text-blue-700"
+                      />
+                      <span className="font-bold text-xs text-slate-700 dark:text-slate-300">{stockInSUnit.toUpperCase()}</span>
+                    </div>
                   </div>
                   <div>
-                    <label className="font-medium text-slate-600 dark:text-slate-400">Halbeegga Iibka *</label>
-                    <select
-                      value={stockInSUnit}
-                      onChange={(e) => setStockInSUnit(e.target.value)}
-                      className="mt-1 flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-xs font-bold"
+                    <label className="font-medium text-slate-700 dark:text-slate-300">
+                      Culeyska 1 Bac (Optional KG)
+                    </label>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className="font-mono font-bold text-xs text-slate-500">1 Bac =</span>
+                      <Input
+                        type="number"
+                        step="0.05"
+                        placeholder="0.5"
+                        value={stockInPackWeight}
+                        onChange={(e) => setStockInPackWeight(e.target.value)}
+                        className="font-mono font-bold w-28"
+                      />
+                      <span className="font-bold text-xs text-slate-700 dark:text-slate-300">KG (500g)</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="text-[11px] text-slate-500 bg-white dark:bg-slate-900 p-2.5 rounded-lg border border-slate-200 dark:border-slate-700 flex justify-between">
+                  <span>Kaydka Guud: <strong className="text-slate-900 dark:text-white font-mono">{stockInCalculation.totalStockQuantity} {stockInSUnit.toUpperCase()}</strong></span>
+                  <span>Cost/Bac Toos ah: <strong className="text-blue-700 dark:text-blue-400 font-mono">${stockInCalculation.costPerSellingUnit.toFixed(4)}/{stockInSUnit.toUpperCase()}</strong></span>
+                </div>
+              </div>
+            )}
+
+            {stockInProductType === 'loose' && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-semibold text-slate-600 dark:text-slate-400">Dooro Habka Xisaabinta:</span>
+                  <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-700 p-0.5 bg-slate-100 dark:bg-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStockInLooseMode('kg_per_bag');
+                        setStockInConv('0.05');
+                      }}
+                      className={`px-2 py-0.5 text-[11px] font-bold rounded-md transition-all ${
+                        stockInLooseMode === 'kg_per_bag' 
+                          ? 'bg-white dark:bg-slate-900 text-purple-700 shadow-xs' 
+                          : 'text-slate-500 hover:text-slate-900'
+                      }`}
                     >
-                      {ALLOWED_SELLING_UNITS.map(u => (
-                        <option key={u.value} value={u.value}>{u.label}</option>
-                      ))}
-                      {!ALLOWED_SELLING_UNITS.some(u => u.value === stockInSUnit) && (
-                        <option value={stockInSUnit}>{stockInSUnit}</option>
-                      )}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="font-medium text-slate-600 dark:text-slate-400">Qiimaha Iibinta ($/{stockInSUnit.toUpperCase()}) *</label>
-                    <Input
-                      type="number"
-                      step="0.01"
-                      placeholder=""
-                      value={stockInSell}
-                      onChange={(e) => setStockInSell(e.target.value)}
-                      className="mt-1 font-mono font-bold text-emerald-700"
-                    />
+                      1 Bac = [KG] (Tusaale 0.05 KG)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStockInLooseMode('bags_per_kg');
+                        setStockInConv('20');
+                      }}
+                      className={`px-2 py-0.5 text-[11px] font-bold rounded-md transition-all ${
+                        stockInLooseMode === 'bags_per_kg' 
+                          ? 'bg-white dark:bg-slate-900 text-purple-700 shadow-xs' 
+                          : 'text-slate-500 hover:text-slate-900'
+                      }`}
+                    >
+                      1 KG = [Bacaha] (Tusaale 20 Bac)
+                    </button>
                   </div>
                 </div>
 
-                {/* Fractional division & Minimum sellable quantity */}
-                <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60 grid grid-cols-2 gap-3 items-center">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
                   <div>
-                    <label className="font-medium text-slate-600 dark:text-slate-400">
-                      1 {stockInSUnit.toUpperCase()} waxaa loo qaybin karaa:
+                    <label className="font-medium text-slate-700 dark:text-slate-300">
+                      {stockInLooseMode === 'kg_per_bag' ? '1 Bac culeyskeeda (KG):' : '1 KG intee Bacood ayuu ka kooban yahay:'} *
                     </label>
-                    <div className="flex items-center gap-1.5 mt-1">
+                    <div className="flex items-center gap-2 mt-1">
                       <Input
                         type="number"
-                        min="1"
-                        step="1"
-                        placeholder="1, 4, 10..."
-                        value={stockInDivision}
-                        onChange={(e) => setStockInDivision(e.target.value)}
-                        className="font-mono font-bold w-24 h-8 text-xs"
+                        step={stockInLooseMode === 'kg_per_bag' ? '0.01' : '1'}
+                        placeholder={stockInLooseMode === 'kg_per_bag' ? '0.05' : '20'}
+                        value={stockInConv}
+                        onChange={(e) => setStockInConv(e.target.value)}
+                        className="font-mono font-bold w-32 text-purple-700"
                       />
-                      <span className="text-[11px] text-slate-500">qeybood</span>
+                      <span className="font-bold text-xs text-slate-700 dark:text-slate-300">
+                        {stockInLooseMode === 'kg_per_bag' ? 'KG (50g)' : 'Bac'}
+                      </span>
                     </div>
                   </div>
-                  <div className="bg-emerald-50 dark:bg-emerald-950/40 p-2 rounded-lg border border-emerald-200 dark:border-emerald-800/60">
-                    <p className="text-[10px] uppercase font-bold text-emerald-800 dark:text-emerald-300">Qiyaasta ugu yar ee la iibin karo (Min Qty):</p>
-                    <p className="text-xs font-black font-mono text-emerald-700 dark:text-emerald-300 mt-0.5">
-                      Minimum: {calculateMinSellableQty(parseFloat(stockInDivision) || 1)} {stockInSUnit.toUpperCase()}
-                    </p>
+                  <div className="text-[11px] text-slate-500 bg-white dark:bg-slate-900 p-2.5 rounded-lg border border-slate-200 dark:border-slate-700">
+                    <p>Wadarta Bacaha Ka Soo Baxaya: <strong className="text-purple-700 dark:text-purple-300 font-mono">{stockInCalculation.totalStockQuantity} Bac</strong></p>
+                    <p>Cost/Bac Toos ah: <strong className="text-purple-700 dark:text-purple-400 font-mono">${stockInCalculation.costPerSellingUnit.toFixed(4)}/Bac</strong></p>
                   </div>
                 </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
-          {/* Pricing Mode Selection (Mode A vs Mode B) */}
-          <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60 space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="font-bold text-slate-700 dark:text-slate-300">
-                Habka Qiimeynta (Pricing Mode) *
-              </label>
-              <div className="flex items-center gap-1.5">
+          {/* STEP 5: SELLING SECTION & MINIMUM SELLABLE QUANTITY */}
+          <div className="bg-slate-50/80 dark:bg-slate-800/40 p-3 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
+            <span className="font-bold text-slate-800 dark:text-slate-200 block">
+              Qaybta Iibinta & Qiyaasta Ugu Yar (Selling & Minimum Step)
+            </span>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300">Sidee ayaad u iibinaysaa? (Selling Unit) *</label>
+                <select
+                  value={stockInSUnit}
+                  onChange={(e) => setStockInSUnit(e.target.value)}
+                  className="mt-1 flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-xs font-bold"
+                >
+                  {ALLOWED_SELLING_UNITS.map(u => (
+                    <option key={u.value} value={u.value}>{u.label}</option>
+                  ))}
+                  {!ALLOWED_SELLING_UNITS.some(u => u.value === stockInSUnit) && (
+                    <option value={stockInSUnit}>{stockInSUnit}</option>
+                  )}
+                </select>
+              </div>
+
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300">
+                  Qiimaha Iibka (${stockInSUnit ? `/${stockInSUnit.toUpperCase()}` : ''}) *
+                </label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  placeholder="0.60"
+                  value={stockInSell}
+                  onChange={(e) => setStockInSell(e.target.value)}
+                  className="mt-1 font-mono font-black text-emerald-700 dark:text-emerald-300 text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300">
+                  Qaybta Ugu Yar ee La Iibin Karo (Min Qty) *
+                </label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  placeholder="0.05, 0.5, 1..."
+                  value={stockInMinSellableQty}
+                  onChange={(e) => setStockInMinSellableQty(e.target.value)}
+                  className="mt-1 font-mono font-bold text-indigo-700 dark:text-indigo-300"
+                />
+              </div>
+            </div>
+
+            {/* Quick-select chips for minimum sellable quantity */}
+            <div className="flex flex-wrap items-center gap-1.5 pt-1">
+              <span className="text-[10px] text-slate-500 font-semibold mr-1">Qiyaasaha caanka ah:</span>
+              {stockInSUnit.toLowerCase() === 'kg' && (
+                <>
+                  {['0.05', '0.10', '0.25', '0.50', '1.00'].map(val => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setStockInMinSellableQty(val)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all ${
+                        stockInMinSellableQty === val 
+                          ? 'bg-emerald-600 text-white shadow-xs' 
+                          : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      {val} KG
+                    </button>
+                  ))}
+                </>
+              )}
+              {stockInSUnit.toLowerCase() === 'liter' && (
+                <>
+                  {['0.10', '0.25', '0.50', '1.00'].map(val => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setStockInMinSellableQty(val)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all ${
+                        stockInMinSellableQty === val 
+                          ? 'bg-amber-600 text-white shadow-xs' 
+                          : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      {val} L
+                    </button>
+                  ))}
+                </>
+              )}
+              {(stockInSUnit.toLowerCase() === 'bac' || stockInSUnit.toLowerCase() === 'pcs') && (
+                <>
+                  {['0.5', '1.0'].map(val => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setStockInMinSellableQty(val)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all ${
+                        stockInMinSellableQty === val 
+                          ? 'bg-blue-600 text-white shadow-xs' 
+                          : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      {val} {stockInSUnit.toUpperCase()}
+                    </button>
+                  ))}
+                </>
+              )}
+            </div>
+
+            {/* Pricing Mode Toggle */}
+            <div className="pt-2 border-t border-slate-200 dark:border-slate-700/60 flex flex-wrap items-center justify-between gap-2">
+              <span className="font-bold text-slate-700 dark:text-slate-300">Habka Qiimeynta (Pricing Mode):</span>
+              <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-700 p-0.5 bg-slate-100 dark:bg-slate-800">
                 <button
                   type="button"
                   onClick={() => setStockInPricingMode('fixed')}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                  className={`px-2.5 py-1 rounded-md text-xs font-bold transition-all ${
                     stockInPricingMode === 'fixed'
                       ? 'bg-indigo-600 text-white shadow-xs'
-                      : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
                   }`}
                 >
                   Mode B: Qiimo Go'an ($ USD)
@@ -1408,10 +1933,10 @@ export default function ProductsPage() {
                 <button
                   type="button"
                   onClick={() => setStockInPricingMode('denomination')}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                  className={`px-2.5 py-1 rounded-md text-xs font-bold transition-all ${
                     stockInPricingMode === 'denomination'
                       ? 'bg-purple-600 text-white shadow-xs'
-                      : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
                   }`}
                 >
                   Mode A: Denomination (SOS)
@@ -1419,7 +1944,7 @@ export default function ProductsPage() {
               </div>
             </div>
 
-            {stockInPricingMode === 'denomination' ? (
+            {stockInPricingMode === 'denomination' && (
               <div className="grid grid-cols-2 gap-3 p-2.5 bg-purple-50/70 dark:bg-purple-950/40 rounded-xl border border-purple-200 dark:border-purple-800/60">
                 <div>
                   <label className="font-bold text-purple-950 dark:text-purple-200 text-[11px]">
@@ -1455,13 +1980,110 @@ export default function ProductsPage() {
                   )}
                 </div>
               </div>
-            ) : (
-              <p className="text-[11px] text-slate-500">
-                Qiimaha USD ee kor lagu qoray ayaa si go'an loogu isticmaali doonaa POS iyadoon waxba laga beddelin.
-              </p>
             )}
           </div>
 
+          {/* STEP 6: LIVE CALCULATION PREVIEW CARD */}
+          <div className={`p-4 rounded-xl border transition-all ${
+            stockInCalculation.isLoss 
+              ? 'bg-red-50/90 dark:bg-red-950/40 border-red-300 dark:border-red-800' 
+              : 'bg-emerald-50/90 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800'
+          }`}>
+            <div className="flex items-center justify-between mb-2.5">
+              <div className="flex items-center gap-1.5 font-black text-xs">
+                <Calculator className={`h-4 w-4 ${stockInCalculation.isLoss ? 'text-red-600' : 'text-emerald-600'}`} />
+                <span className={stockInCalculation.isLoss ? 'text-red-900 dark:text-red-200' : 'text-emerald-900 dark:text-emerald-200'}>
+                  Xisaabinta Tooska ah ee Nidaamka (Live Authoritative Summary)
+                </span>
+              </div>
+              <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
+                stockInCalculation.isLoss 
+                  ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 border border-red-300' 
+                  : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200 border border-emerald-300'
+              }`}>
+                {stockInCalculation.conversionSummary}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
+              {/* STOCK */}
+              <div className="bg-white/90 dark:bg-slate-900/90 p-2.5 rounded-lg border border-slate-200/80 dark:border-slate-800">
+                <span className="text-[10px] uppercase font-sans text-slate-500 font-bold block">Kaydka (Stock)</span>
+                <span className="text-sm font-black text-slate-900 dark:text-white">
+                  {stockInCalculation.totalStockQuantity.toLocaleString()} {stockInSUnit.toUpperCase()}
+                </span>
+                {stockInProductType === 'carton' && stockInPackWeight && (
+                  <span className="text-[10px] block text-slate-400 font-normal">
+                    ≈ {cleanPrecision(stockInCalculation.totalStockQuantity * Number(stockInPackWeight))} KG
+                  </span>
+                )}
+                {stockInProductType === 'jawan' && (
+                  <span className="text-[10px] block text-slate-400 font-normal">
+                    = {stockInQty || 0} Jawan
+                  </span>
+                )}
+              </div>
+
+              {/* EXACT COST PER SELLING UNIT */}
+              <div className="bg-white/90 dark:bg-slate-900/90 p-2.5 rounded-lg border border-slate-200/80 dark:border-slate-800">
+                <span className="text-[10px] uppercase font-sans text-slate-500 font-bold block">Qiimaha Kugu Kacay (Cost)</span>
+                <span className="text-sm font-black text-slate-800 dark:text-slate-200">
+                  ${stockInCalculation.costPerSellingUnit.toFixed(stockInCalculation.costPerSellingUnit % 1 === 0 ? 2 : (stockInCalculation.costPerSellingUnit * 100 % 1 === 0 ? 2 : (stockInCalculation.costPerSellingUnit * 1000 % 1 === 0 ? 3 : 4)))} / {stockInSUnit.toUpperCase()}
+                </span>
+                <span className="text-[10px] block text-slate-400 font-normal">
+                  Wadarta: ${stockInCalculation.totalPurchaseCost.toFixed(2)}
+                </span>
+              </div>
+
+              {/* SELLING PRICE */}
+              <div className="bg-white/90 dark:bg-slate-900/90 p-2.5 rounded-lg border border-slate-200/80 dark:border-slate-800">
+                <span className="text-[10px] uppercase font-sans text-slate-500 font-bold block">Qiimaha Iibka (Sell)</span>
+                <span className="text-sm font-black text-emerald-600 dark:text-emerald-400">
+                  ${stockInCalculation.sellPricePerUnit.toFixed(2)} / {stockInSUnit.toUpperCase()}
+                </span>
+                <span className="text-[10px] block text-slate-400 font-normal">
+                  Min: {stockInCalculation.minSellableQty} {stockInSUnit.toUpperCase()}
+                </span>
+              </div>
+
+              {/* EXACT PROFIT OR LOSS */}
+              <div className={`p-2.5 rounded-lg border ${
+                stockInCalculation.isLoss 
+                  ? 'bg-red-100 dark:bg-red-950/60 border-red-300 dark:border-red-800 text-red-900 dark:text-red-200' 
+                  : 'bg-emerald-100 dark:bg-emerald-950/60 border-emerald-300 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200'
+              }`}>
+                <span className={`text-[10px] uppercase font-sans font-bold block ${stockInCalculation.isLoss ? 'text-red-700 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'}`}>
+                  {stockInCalculation.isLoss ? 'KHASAARE (LOSS)' : 'FAA\'IIDO (PROFIT)'}
+                </span>
+                <span className={`text-sm font-black ${stockInCalculation.isLoss ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                  {stockInCalculation.profitPerUnit >= 0 ? '+' : ''}${stockInCalculation.profitPerUnit.toFixed(stockInCalculation.profitPerUnit % 1 === 0 ? 2 : (stockInCalculation.profitPerUnit * 100 % 1 === 0 ? 2 : (stockInCalculation.profitPerUnit * 1000 % 1 === 0 ? 3 : 4)))} / {stockInSUnit.toUpperCase()}
+                </span>
+                <span className={`text-[10px] block font-semibold ${stockInCalculation.isLoss ? 'text-red-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                  {stockInCalculation.isLoss ? 'Digniin: Qiimo hooseeya' : `${stockInCalculation.costPerSellingUnit > 0 ? ((stockInCalculation.profitPerUnit / stockInCalculation.costPerSellingUnit) * 100).toFixed(0) : 0}% margin`}
+                </span>
+              </div>
+            </div>
+
+            {/* FRACTIONAL SALE EXAMPLE IF MIN < 1 */}
+            {stockInCalculation.fractionalExample && (
+              <div className="mt-2.5 pt-2 border-t border-slate-200 dark:border-slate-700/60 text-[11px] text-slate-700 dark:text-slate-300 flex flex-wrap items-center justify-between gap-1">
+                <span className="font-semibold">
+                  Tusaale: Haddii macaamiilku gato {stockInCalculation.fractionalExample.qty} {stockInSUnit.toUpperCase()}:
+                </span>
+                <div className="flex items-center gap-3 font-mono">
+                  <span>Iib: <strong>${stockInCalculation.fractionalExample.revenue.toFixed(2)}</strong></span>
+                  <span>Cost: <strong>${stockInCalculation.fractionalExample.cost.toFixed(3)}</strong></span>
+                  <span>Faa'iido: <strong className={stockInCalculation.fractionalExample.exactProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}>
+                    ${stockInCalculation.fractionalExample.exactProfit.toFixed(3)} (Display: ${stockInCalculation.fractionalExample.displayProfit.toFixed(2)})
+                  </strong></span>
+                </div>
+              </div>
+            )}
+          </div>
+            </>
+          )}
+
+          {/* STEP 7: SUPPLIER & CATEGORY */}
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="font-bold text-slate-700 dark:text-slate-300">Alaab-qeybiyaha (Supplier)</label>
@@ -1517,62 +2139,83 @@ export default function ProductsPage() {
         </DialogHeader>
 
         <DialogBody className="space-y-4 text-xs">
-          {/* Model Selector in Edit */}
+          {/* STEP 1: PRODUCT MODEL SELECTOR (4 CARDS) */}
           <div>
-            <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
-              Habka Maareynta Alaabta (Product Management Model) *
+            <label className="font-black text-slate-800 dark:text-slate-200 block mb-1.5 text-xs">
+              1. Nooca Habka Alaabta (Product Category / Arrival Model) *
             </label>
-            <div className="grid grid-cols-3 gap-2 p-1 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {/* 1. Jawan / Sack */}
               <button
                 type="button"
-                onClick={() => setEditManagementMode('standard')}
-                className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-bold transition-all ${
-                  editManagementMode === 'standard'
-                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                onClick={() => selectEditProductType('jawan')}
+                className={`flex flex-col items-start p-2.5 rounded-xl border text-left transition-all ${
+                  editProductType === 'jawan'
+                    ? 'border-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200 ring-2 ring-emerald-500/20 shadow-xs'
+                    : 'border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-slate-700 dark:text-slate-300'
                 }`}
               >
-                <Package className="h-3.5 w-3.5 text-emerald-600" />
-                <span>Standard (Caadi)</span>
+                <div className="flex items-center gap-1.5 mb-1">
+                  <Package className="h-4 w-4 text-emerald-600" />
+                  <span className="font-bold text-xs">Kiish / Jawan</span>
+                </div>
+                <p className="text-[10px] text-slate-500 leading-tight">Bariis, Bur, Sokor (KG lagu iibiyo)</p>
               </button>
 
+              {/* 2. Liquid / Liter */}
               <button
                 type="button"
-                onClick={() => {
-                  setEditManagementMode('pack_based');
-                  setEditSellingUnit('bac');
-                  setEditPurchaseUnit('g');
-                }}
-                className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-bold transition-all ${
-                  editManagementMode === 'pack_based'
-                    ? 'bg-blue-600 text-white shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                onClick={() => selectEditProductType('liquid')}
+                className={`flex flex-col items-start p-2.5 rounded-xl border text-left transition-all ${
+                  editProductType === 'liquid'
+                    ? 'border-amber-600 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 ring-2 ring-amber-500/20 shadow-xs'
+                    : 'border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-slate-700 dark:text-slate-300'
                 }`}
               >
-                <Boxes className="h-3.5 w-3.5" />
-                <span>Pack-based (Bac / Xawaaji)</span>
+                <div className="flex items-center gap-1.5 mb-1">
+                  <Droplets className="h-4 w-4 text-amber-600" />
+                  <span className="font-bold text-xs">Dareere / Saliid</span>
+                </div>
+                <p className="text-[10px] text-slate-500 leading-tight">Caag Saliid ah (Litir lagu iibiyo)</p>
               </button>
 
+              {/* 3. Carton / Pack */}
               <button
                 type="button"
-                onClick={() => {
-                  setEditManagementMode('amount_based');
-                  setEditSellingUnit('liter');
-                  setEditPurchaseUnit('caag');
-                  setEditConversion('20');
-                }}
-                className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-bold transition-all ${
-                  editManagementMode === 'amount_based'
-                    ? 'bg-amber-600 text-white shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                onClick={() => selectEditProductType('carton')}
+                className={`flex flex-col items-start p-2.5 rounded-xl border text-left transition-all ${
+                  editProductType === 'carton'
+                    ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/40 text-blue-900 dark:text-blue-200 ring-2 ring-blue-500/20 shadow-xs'
+                    : 'border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-slate-700 dark:text-slate-300'
                 }`}
               >
-                <Droplets className="h-3.5 w-3.5" />
-                <span>Amount-based (Saliid / Oil)</span>
+                <div className="flex items-center gap-1.5 mb-1">
+                  <Boxes className="h-4 w-4 text-blue-600" />
+                  <span className="font-bold text-xs">Kartoon / Pack</span>
+                </div>
+                <p className="text-[10px] text-slate-500 leading-tight">Basto, Baakado (Bac/Pcs lagu iibiyo)</p>
+              </button>
+
+              {/* 4. Loose / Bulk */}
+              <button
+                type="button"
+                onClick={() => selectEditProductType('loose')}
+                className={`flex flex-col items-start p-2.5 rounded-xl border text-left transition-all ${
+                  editProductType === 'loose'
+                    ? 'border-purple-600 bg-purple-50 dark:bg-purple-950/40 text-purple-900 dark:text-purple-200 ring-2 ring-purple-500/20 shadow-xs'
+                    : 'border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-slate-700 dark:text-slate-300'
+                }`}
+              >
+                <div className="flex items-center gap-1.5 mb-1">
+                  <Scale className="h-4 w-4 text-purple-600" />
+                  <span className="font-bold text-xs">Shub-shub / Bulk</span>
+                </div>
+                <p className="text-[10px] text-slate-500 leading-tight">Xawaaji, Budo (KG loo qeybiyo Bac)</p>
               </button>
             </div>
           </div>
 
+          {/* STEP 2: PRODUCT IDENTIFICATION */}
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="font-bold text-slate-700 dark:text-slate-300">Magaca Alaabta *</label>
@@ -1611,266 +2254,336 @@ export default function ProductsPage() {
             </div>
           </div>
 
-          {/* Conditional Sections in Edit Modal */}
-          {editManagementMode === 'pack_based' ? (
-            <div className="bg-blue-50/70 dark:bg-blue-950/40 p-3.5 rounded-xl border border-blue-200 dark:border-blue-800/60 space-y-3">
-              <div className="flex items-center gap-2 text-blue-900 dark:text-blue-300 font-black">
-                <Boxes className="h-4 w-4 text-blue-600" />
-                <span>Habka Qaybinta Baakadaha (Pack-Based Configuration)</span>
-              </div>
+          {/* STEP 3: PURCHASE SECTION */}
+          <div className="bg-slate-50/80 dark:bg-slate-800/40 p-3 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
+            <div className="flex items-center justify-between text-slate-800 dark:text-slate-200 font-bold">
+              <span>Qaybta Qiimaha Soo Iibka (Purchase Details)</span>
+              {editBuyPrice && (
+                <span className="text-[11px] font-mono text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-200/60">
+                  {editingVariant?.is_pending && editIncomingQty ? `${editIncomingQty} × $${editBuyPrice} = $${(Number(editIncomingQty) * Number(editBuyPrice)).toFixed(2)}` : `1 ${editPurchaseUnit.toUpperCase()} = $${editBuyPrice}`}
+                </span>
+              )}
+            </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {editingVariant?.is_pending && (
                 <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Tirada Guud ee Asalka *</label>
+                  <label className="font-bold text-slate-700 dark:text-slate-300">
+                    Tirada Soo Gashay ({editPurchaseUnit.toUpperCase()}) *
+                  </label>
                   <Input
                     type="number"
                     step="0.01"
-                    placeholder="500"
-                    value={editSourceQty}
-                    onChange={(e) => setEditSourceQty(e.target.value)}
-                    className="mt-1 font-mono font-bold"
+                    min="0.01"
+                    value={editIncomingQty}
+                    onChange={(e) => setEditIncomingQty(e.target.value)}
+                    className="mt-1 font-mono font-bold text-slate-900 dark:text-white"
                   />
                 </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Halbeegga Asalka *</label>
-                  <select
-                    value={editSourceUnit}
-                    onChange={(e) => setEditSourceUnit(e.target.value)}
-                    className="mt-1 flex h-9 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs font-bold"
-                  >
-                    <option value="g">Gram (g)</option>
-                    <option value="kg">KG</option>
-                    <option value="pcs">PCS</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Tirada Bacaha Loo Qaybiyey *</label>
-                  <Input
-                    type="number"
-                    min="1"
-                    step="1"
-                    placeholder="10"
-                    value={editPackCount}
-                    onChange={(e) => setEditPackCount(e.target.value)}
-                    className="mt-1 font-mono font-bold text-blue-700"
-                  />
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Halbeegga Iibka *</label>
-                  <Input
-                    value={editSellingPackUnit}
-                    onChange={(e) => setEditSellingPackUnit(e.target.value)}
-                    placeholder="bac"
-                    className="mt-1 font-bold"
-                  />
-                </div>
+              )}
+
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300">
+                  {editProductType === 'jawan' 
+                    ? 'Qiimaha Hal Jawan / Kiish ($) *'
+                    : editProductType === 'liquid'
+                    ? 'Qiimaha Hal Caag ($) *'
+                    : editProductType === 'carton'
+                    ? 'Qiimaha Hal Carton ($) *'
+                    : (editLooseMode === 'bags_per_kg' ? 'Qiimaha Guud ee KG-ga ($) *' : 'Qiimaha Hal KG ($) *')
+                  }
+                </label>
+                <Input
+                  type="number"
+                  step="0.001"
+                  min="0"
+                  placeholder="Tusaale: 12.40, 32.00, 8.60..."
+                  value={editBuyPrice}
+                  onChange={(e) => setEditBuyPrice(e.target.value)}
+                  className="mt-1 font-mono font-bold text-slate-900 dark:text-white"
+                />
               </div>
 
-              {/* Realtime Pack Formula Preview */}
-              <div className="p-2.5 bg-white dark:bg-slate-900 rounded-lg border border-blue-200 dark:border-blue-800 text-xs flex items-center justify-between">
-                <div>
-                  <span className="text-slate-500 font-medium">Qiyaasta 1 {editSellingPackUnit.toUpperCase()}: </span>
-                  <strong className="text-blue-700 dark:text-blue-300 font-mono text-sm">
-                    {calculatePackRatio(Number(editSourceQty), Number(editPackCount)).qtyPerPack} {editSourceUnit}
-                  </strong>
-                </div>
-                <Badge variant="outline" className="bg-blue-50 dark:bg-blue-950 font-mono text-blue-800 dark:text-blue-200 border-blue-300">
-                  {editSourceQty}{editSourceUnit} ÷ {editPackCount} {editSellingPackUnit} = {calculatePackRatio(Number(editSourceQty), Number(editPackCount)).qtyPerPack}{editSourceUnit}
-                </Badge>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3 pt-2 border-t border-blue-200/60 dark:border-blue-800/60">
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Qiimaha Soo Iibka Guud ($)</label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    value={editBuyPrice}
-                    onChange={(e) => setEditBuyPrice(e.target.value)}
-                    className="mt-1 font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Qiimaha Iibinta Halkii {editSellingPackUnit.toUpperCase()} ($) *</label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    value={editSellPrice}
-                    onChange={(e) => setEditSellPrice(e.target.value)}
-                    className="mt-1 font-mono font-black text-emerald-700 dark:text-emerald-300"
-                  />
-                </div>
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300">
+                  Halbeegga Soo Galka (Purchase Unit)
+                </label>
+                <Input
+                  value={editPurchaseUnit}
+                  onChange={(e) => setEditPurchaseUnit(e.target.value)}
+                  className="mt-1 font-bold uppercase text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800"
+                />
               </div>
             </div>
-          ) : editManagementMode === 'amount_based' ? (
-            <div className="bg-amber-50/70 dark:bg-amber-950/40 p-3.5 rounded-xl border border-amber-200 dark:border-amber-800/60 space-y-3">
-              <div className="flex items-center gap-2 text-amber-900 dark:text-amber-300 font-black">
-                <Droplets className="h-4 w-4 text-amber-600" />
-                <span>Habka Saliidda (Cooking Oil Configuration)</span>
-              </div>
+          </div>
 
-              <div className="grid grid-cols-3 gap-2.5">
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Halbeegga Weelka *</label>
-                  <select
-                    value={editContainerUnit}
-                    onChange={(e) => setEditContainerUnit(e.target.value)}
-                    className="mt-1 flex h-9 w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs font-bold"
-                  >
-                    <option value="caag">Caag (Jerrycan)</option>
-                    <option value="drum">Drum / Foosto</option>
-                    <option value="dhalo">Dhalo</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Litir / Weelkii *</label>
-                  <Input
-                    type="number"
-                    step="0.1"
-                    value={editContainerCapacity}
-                    onChange={(e) => setEditContainerCapacity(e.target.value)}
-                    className="mt-1 font-mono font-bold text-amber-700"
-                  />
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Qiimaha Baseline ($/L)</label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    value={editSellPrice}
-                    onChange={(e) => setEditSellPrice(e.target.value)}
-                    className="mt-1 font-mono"
-                  />
-                </div>
-              </div>
+          {/* STEP 4: CONVERSION SECTION */}
+          <div className="bg-slate-50/80 dark:bg-slate-800/40 p-3 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
+            <span className="font-bold text-slate-800 dark:text-slate-200 block">
+              Xaddiga Halbeegga Soo Galka (What does ONE purchase unit contain?)
+            </span>
 
-              <div className="p-2.5 bg-white dark:bg-slate-900 rounded-lg border border-amber-200 dark:border-amber-800 text-xs">
-                <p className="text-slate-600 dark:text-slate-400">
-                  Saliidda waxaa kaydkeeda lagu tiriyaa <strong>Litir</strong>. Dufcad kasta oo soo gasha waxay leedahay qiimo gooni ah oo POS & Warbixinnada si toos ah loogu xisaabinayo.
-                </p>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Qiimaha Soo Iibka ($)</label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    value={editBuyPrice}
-                    onChange={(e) => setEditBuyPrice(e.target.value)}
-                    className="mt-1 font-mono font-bold"
-                  />
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Halbeegga Soo Galka *</label>
-                  <select
-                    value={editPurchaseUnit}
-                    onChange={(e) => setEditPurchaseUnit(e.target.value)}
-                    className="mt-1 flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-xs font-bold"
-                  >
-                    {ALLOWED_INCOMING_UNITS.map(u => (
-                      <option key={u.value} value={u.value}>{u.label}</option>
-                    ))}
-                    {!ALLOWED_INCOMING_UNITS.some(u => u.value === editPurchaseUnit) && (
-                      <option value={editPurchaseUnit}>{editPurchaseUnit}</option>
-                    )}
-                  </select>
-                </div>
-                <div>
-                  <label className="font-bold text-slate-700 dark:text-slate-300">Qiimaha Iibinta ($/{editSellingUnit.toUpperCase()}) *</label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    value={editSellPrice}
-                    onChange={(e) => setEditSellPrice(e.target.value)}
-                    className="mt-1 font-mono font-black text-emerald-700 dark:text-emerald-400"
-                  />
-                </div>
-              </div>
-
-              <div className="bg-slate-50 dark:bg-slate-800/40 p-3 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
-                <div className="grid grid-cols-3 gap-3">
-                  <div>
-                    <label className="font-medium text-slate-600 dark:text-slate-400">1 {editPurchaseUnit.toUpperCase()} =</label>
+            {editProductType === 'jawan' && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-3">
+                  <span className="font-bold text-xs text-slate-600 dark:text-slate-400">1 Jawan / Kiish =</span>
+                  <div className="flex items-center gap-2">
                     <Input
                       type="number"
+                      step="0.1"
+                      placeholder="25"
                       value={editConversion}
                       onChange={(e) => setEditConversion(e.target.value)}
-                      className="mt-1 font-mono"
+                      className="font-mono font-bold w-28 text-emerald-700"
                     />
-                  </div>
-                  <div>
-                    <label className="font-medium text-slate-600 dark:text-slate-400">Halbeegga Iibka *</label>
-                    <select
-                      value={editSellingUnit}
-                      onChange={(e) => setEditSellingUnit(e.target.value)}
-                      className="mt-1 flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-xs font-bold"
-                    >
-                      {ALLOWED_SELLING_UNITS.map(u => (
-                        <option key={u.value} value={u.value}>{u.label}</option>
-                      ))}
-                      {!ALLOWED_SELLING_UNITS.some(u => u.value === editSellingUnit) && (
-                        <option value={editSellingUnit}>{editSellingUnit}</option>
-                      )}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="font-medium text-slate-600 dark:text-slate-400">Heerka Digniinta (Min Stock)</label>
-                    <Input
-                      type="number"
-                      value={editMinStock}
-                      onChange={(e) => setEditMinStock(e.target.value)}
-                      className="mt-1 font-mono"
-                    />
-                  </div>
-                </div>
-
-                {/* Fractional division & Minimum sellable quantity in Edit Modal */}
-                <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60 grid grid-cols-2 gap-3 items-center">
-                  <div>
-                    <label className="font-medium text-slate-600 dark:text-slate-400">
-                      1 {editSellingUnit.toUpperCase()} waxaa loo qaybin karaa:
-                    </label>
-                    <div className="flex items-center gap-1.5 mt-1">
-                      <Input
-                        type="number"
-                        min="1"
-                        step="1"
-                        placeholder="1, 4, 10..."
-                        value={editDivision}
-                        onChange={(e) => setEditDivision(e.target.value)}
-                        className="font-mono font-bold w-24 h-8 text-xs"
-                      />
-                      <span className="text-[11px] text-slate-500">qeybood</span>
-                    </div>
-                  </div>
-                  <div className="bg-emerald-50 dark:bg-emerald-950/40 p-2 rounded-lg border border-emerald-200 dark:border-emerald-800/60">
-                    <p className="text-[10px] uppercase font-bold text-emerald-800 dark:text-emerald-300">Qiyaasta ugu yar ee la iibin karo (Min Qty):</p>
-                    <p className="text-xs font-black font-mono text-emerald-700 dark:text-emerald-300 mt-0.5">
-                      Minimum: {calculateMinSellableQty(parseFloat(editDivision) || 1)} {editSellingUnit.toUpperCase()}
-                    </p>
+                    <span className="font-bold text-xs text-slate-700 dark:text-slate-300">KG</span>
                   </div>
                 </div>
               </div>
-            </>
-          )}
+            )}
 
-          {/* Pricing Mode Selection (Mode A vs Mode B) in Edit Modal */}
-          <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60 space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="font-bold text-slate-700 dark:text-slate-300">
-                Habka Qiimeynta (Pricing Mode) *
-              </label>
-              <div className="flex items-center gap-1.5">
+            {editProductType === 'liquid' && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-3">
+                  <span className="font-bold text-xs text-slate-600 dark:text-slate-400">1 Caag =</span>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      step="0.1"
+                      placeholder="20"
+                      value={editConversion}
+                      onChange={(e) => setEditConversion(e.target.value)}
+                      className="font-mono font-bold w-28 text-amber-700"
+                    />
+                    <span className="font-bold text-xs text-slate-700 dark:text-slate-300">Liter</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {editProductType === 'carton' && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+                  <div>
+                    <label className="font-medium text-slate-700 dark:text-slate-300">
+                      1 Carton intee Bac/Baakad ayuu ka kooban yahay? *
+                    </label>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className="font-mono font-bold text-xs text-slate-500">1 Carton =</span>
+                      <Input
+                        type="number"
+                        step="1"
+                        placeholder="20"
+                        value={editConversion}
+                        onChange={(e) => setEditConversion(e.target.value)}
+                        className="font-mono font-bold w-28 text-blue-700"
+                      />
+                      <span className="font-bold text-xs text-slate-700 dark:text-slate-300">{editSellingUnit.toUpperCase()}</span>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="font-medium text-slate-700 dark:text-slate-300">
+                      Culeyska 1 Bac (Optional KG)
+                    </label>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className="font-mono font-bold text-xs text-slate-500">1 Bac =</span>
+                      <Input
+                        type="number"
+                        step="0.01"
+                        placeholder="0.5"
+                        value={editPackWeight}
+                        onChange={(e) => setEditPackWeight(e.target.value)}
+                        className="font-mono font-bold w-24 text-slate-700"
+                      />
+                      <span className="font-bold text-xs text-slate-700 dark:text-slate-300">KG (500g)</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {editProductType === 'loose' && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-bold text-slate-600 dark:text-slate-400">Qaabka Qaybinta:</span>
+                  <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-700 p-0.5 bg-slate-100 dark:bg-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => setEditLooseMode('kg_per_bag')}
+                      className={`px-2 py-0.5 rounded text-[11px] font-bold transition-all ${
+                        editLooseMode === 'kg_per_bag' 
+                          ? 'bg-purple-600 text-white shadow-xs' 
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      1 Bac = [X] KG
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditLooseMode('bags_per_kg')}
+                      className={`px-2 py-0.5 rounded text-[11px] font-bold transition-all ${
+                        editLooseMode === 'bags_per_kg' 
+                          ? 'bg-purple-600 text-white shadow-xs' 
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      1 KG = [X] Bac
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  {editLooseMode === 'kg_per_bag' ? (
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-xs text-purple-900 dark:text-purple-300">1 Bac =</span>
+                      <Input
+                        type="number"
+                        step="0.001"
+                        placeholder="0.05"
+                        value={editConversion}
+                        onChange={(e) => setEditConversion(e.target.value)}
+                        className="font-mono font-bold w-28 text-purple-700"
+                      />
+                      <span className="font-bold text-xs text-slate-700 dark:text-slate-300">KG (Tusaale: 0.05 KG = 50g)</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-xs text-purple-900 dark:text-purple-300">1 KG =</span>
+                      <Input
+                        type="number"
+                        step="1"
+                        placeholder="20"
+                        value={editConversion}
+                        onChange={(e) => setEditConversion(e.target.value)}
+                        className="font-mono font-bold w-28 text-purple-700"
+                      />
+                      <span className="font-bold text-xs text-slate-700 dark:text-slate-300">Bacood</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* STEP 5: SELLING & MINIMUM SELLABLE QUANTITY */}
+          <div className="bg-slate-50/80 dark:bg-slate-800/40 p-3 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
+            <span className="font-bold text-slate-800 dark:text-slate-200 block">
+              Qaybta Iibinta & Qadarka Ugu Yar (Selling Configuration)
+            </span>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300">
+                  Halbeegga Iibka (Selling Unit) *
+                </label>
+                <Input
+                  value={editSellingUnit}
+                  onChange={(e) => setEditSellingUnit(e.target.value)}
+                  className="mt-1 font-bold uppercase text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800"
+                />
+              </div>
+
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300">
+                  Qiimaha Iibka ($/{editSellingUnit.toUpperCase()}) *
+                </label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  placeholder="0.60, 2.00, 0.50..."
+                  value={editSellPrice}
+                  onChange={(e) => setEditSellPrice(e.target.value)}
+                  className="mt-1 font-mono font-black text-emerald-600 dark:text-emerald-400"
+                />
+              </div>
+
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300">
+                  Qadarka Ugu Yar ee La Iibin Karo (Min Qty) *
+                </label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  placeholder="0.05, 0.1, 0.5, 1..."
+                  value={editMinSellableQty}
+                  onChange={(e) => setEditMinSellableQty(e.target.value)}
+                  className="mt-1 font-mono font-bold text-blue-600 dark:text-blue-400"
+                />
+              </div>
+            </div>
+
+            {/* Quick Chips for Minimum Sellable Quantity */}
+            <div className="flex flex-wrap items-center gap-1.5 pt-1">
+              <span className="text-[10px] text-slate-500 font-semibold">Talooyin Degdeg ah (Quick presets):</span>
+              {editSellingUnit.toLowerCase() === 'kg' && (
+                <>
+                  {['0.05', '0.10', '0.25', '0.50', '1.0'].map(val => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setEditMinSellableQty(val)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all ${
+                        editMinSellableQty === val 
+                          ? 'bg-emerald-600 text-white shadow-xs' 
+                          : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      {val} KG
+                    </button>
+                  ))}
+                </>
+              )}
+              {editSellingUnit.toLowerCase() === 'liter' && (
+                <>
+                  {['0.10', '0.25', '0.50', '1.0'].map(val => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setEditMinSellableQty(val)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all ${
+                        editMinSellableQty === val 
+                          ? 'bg-amber-600 text-white shadow-xs' 
+                          : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      {val} L
+                    </button>
+                  ))}
+                </>
+              )}
+              {(editSellingUnit.toLowerCase() === 'bac' || editSellingUnit.toLowerCase() === 'pcs') && (
+                <>
+                  {['0.5', '1.0'].map(val => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setEditMinSellableQty(val)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all ${
+                        editMinSellableQty === val 
+                          ? 'bg-blue-600 text-white shadow-xs' 
+                          : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      {val} {editSellingUnit.toUpperCase()}
+                    </button>
+                  ))}
+                </>
+              )}
+            </div>
+
+            {/* Pricing Mode Toggle */}
+            <div className="pt-2 border-t border-slate-200 dark:border-slate-700/60 flex flex-wrap items-center justify-between gap-2">
+              <span className="font-bold text-slate-700 dark:text-slate-300">Habka Qiimeynta (Pricing Mode):</span>
+              <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-700 p-0.5 bg-slate-100 dark:bg-slate-800">
                 <button
                   type="button"
                   onClick={() => setEditPricingMode('fixed')}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                  className={`px-2.5 py-1 rounded-md text-xs font-bold transition-all ${
                     editPricingMode === 'fixed'
                       ? 'bg-indigo-600 text-white shadow-xs'
-                      : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
                   }`}
                 >
                   Mode B: Qiimo Go'an ($ USD)
@@ -1878,10 +2591,10 @@ export default function ProductsPage() {
                 <button
                   type="button"
                   onClick={() => setEditPricingMode('denomination')}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                  className={`px-2.5 py-1 rounded-md text-xs font-bold transition-all ${
                     editPricingMode === 'denomination'
                       ? 'bg-purple-600 text-white shadow-xs'
-                      : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
                   }`}
                 >
                   Mode A: Denomination (SOS)
@@ -1889,7 +2602,7 @@ export default function ProductsPage() {
               </div>
             </div>
 
-            {editPricingMode === 'denomination' ? (
+            {editPricingMode === 'denomination' && (
               <div className="grid grid-cols-2 gap-3 p-2.5 bg-purple-50/70 dark:bg-purple-950/40 rounded-xl border border-purple-200 dark:border-purple-800/60">
                 <div>
                   <label className="font-bold text-purple-950 dark:text-purple-200 text-[11px]">
@@ -1925,11 +2638,113 @@ export default function ProductsPage() {
                   )}
                 </div>
               </div>
-            ) : (
-              <p className="text-[11px] text-slate-500">
-                Qiimaha USD ee kor lagu qoray ayaa si go'an loogu isticmaali doonaa POS iyadoon waxba laga beddelin.
-              </p>
             )}
+          </div>
+
+          {/* STEP 6: LIVE CALCULATION PREVIEW CARD */}
+          <div className={`p-4 rounded-xl border transition-all ${
+            editCalculation.isLoss 
+              ? 'bg-red-50/90 dark:bg-red-950/40 border-red-300 dark:border-red-800' 
+              : 'bg-emerald-50/90 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800'
+          }`}>
+            <div className="flex items-center justify-between mb-2.5">
+              <div className="flex items-center gap-1.5 font-black text-xs">
+                <Calculator className={`h-4 w-4 ${editCalculation.isLoss ? 'text-red-600' : 'text-emerald-600'}`} />
+                <span className={editCalculation.isLoss ? 'text-red-900 dark:text-red-200' : 'text-emerald-900 dark:text-emerald-200'}>
+                  Xisaabinta Tooska ah ee Nidaamka (Live Authoritative Summary)
+                </span>
+              </div>
+              <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
+                editCalculation.isLoss 
+                  ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 border border-red-300' 
+                  : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200 border border-emerald-300'
+              }`}>
+                {editCalculation.conversionSummary}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
+              {/* STOCK */}
+              <div className="bg-white/90 dark:bg-slate-900/90 p-2.5 rounded-lg border border-slate-200/80 dark:border-slate-800">
+                <span className="text-[10px] uppercase font-sans text-slate-500 font-bold block">Kaydka (Stock)</span>
+                <span className="text-sm font-black text-slate-900 dark:text-white">
+                  {editingVariant?.stock_quantity ?? 0} {editSellingUnit.toUpperCase()}
+                </span>
+                {editProductType === 'carton' && editPackWeight && (
+                  <span className="text-[10px] block text-slate-400 font-normal">
+                    ≈ {cleanPrecision((editingVariant?.stock_quantity ?? 0) * Number(editPackWeight))} KG
+                  </span>
+                )}
+              </div>
+
+              {/* EXACT COST PER SELLING UNIT */}
+              <div className="bg-white/90 dark:bg-slate-900/90 p-2.5 rounded-lg border border-slate-200/80 dark:border-slate-800">
+                <span className="text-[10px] uppercase font-sans text-slate-500 font-bold block">Qiimaha Kugu Kacay (Cost)</span>
+                <span className="text-sm font-black text-slate-800 dark:text-slate-200">
+                  ${editCalculation.costPerSellingUnit.toFixed(editCalculation.costPerSellingUnit % 1 === 0 ? 2 : (editCalculation.costPerSellingUnit * 100 % 1 === 0 ? 2 : (editCalculation.costPerSellingUnit * 1000 % 1 === 0 ? 3 : 4)))} / {editSellingUnit.toUpperCase()}
+                </span>
+                <span className="text-[10px] block text-slate-400 font-normal">
+                  Soo Galka: 1 {editPurchaseUnit.toUpperCase()} = ${editBuyPrice || 0}
+                </span>
+              </div>
+
+              {/* SELLING PRICE */}
+              <div className="bg-white/90 dark:bg-slate-900/90 p-2.5 rounded-lg border border-slate-200/80 dark:border-slate-800">
+                <span className="text-[10px] uppercase font-sans text-slate-500 font-bold block">Qiimaha Iibka (Sell)</span>
+                <span className="text-sm font-black text-emerald-600 dark:text-emerald-400">
+                  ${editCalculation.sellPricePerUnit.toFixed(2)} / {editSellingUnit.toUpperCase()}
+                </span>
+                <span className="text-[10px] block text-slate-400 font-normal">
+                  Min: {editCalculation.minSellableQty} {editSellingUnit.toUpperCase()}
+                </span>
+              </div>
+
+              {/* EXACT PROFIT OR LOSS */}
+              <div className={`p-2.5 rounded-lg border ${
+                editCalculation.isLoss 
+                  ? 'bg-red-100 dark:bg-red-950/60 border-red-300 dark:border-red-800 text-red-900 dark:text-red-200' 
+                  : 'bg-emerald-100 dark:bg-emerald-950/60 border-emerald-300 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200'
+              }`}>
+                <span className={`text-[10px] uppercase font-sans font-bold block ${editCalculation.isLoss ? 'text-red-700 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'}`}>
+                  {editCalculation.isLoss ? 'KHASAARE (LOSS)' : 'FAA\'IIDO (PROFIT)'}
+                </span>
+                <span className={`text-sm font-black ${editCalculation.isLoss ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                  {editCalculation.profitPerUnit >= 0 ? '+' : ''}${editCalculation.profitPerUnit.toFixed(editCalculation.profitPerUnit % 1 === 0 ? 2 : (editCalculation.profitPerUnit * 100 % 1 === 0 ? 2 : (editCalculation.profitPerUnit * 1000 % 1 === 0 ? 3 : 4)))} / {editSellingUnit.toUpperCase()}
+                </span>
+                <span className={`text-[10px] block font-semibold ${editCalculation.isLoss ? 'text-red-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                  {editCalculation.isLoss ? 'Digniin: Qiimo hooseeya' : `${editCalculation.costPerSellingUnit > 0 ? ((editCalculation.profitPerUnit / editCalculation.costPerSellingUnit) * 100).toFixed(0) : 0}% margin`}
+                </span>
+              </div>
+            </div>
+
+            {/* FRACTIONAL SALE EXAMPLE IF MIN < 1 */}
+            {editCalculation.fractionalExample && (
+              <div className="mt-2.5 pt-2 border-t border-slate-200 dark:border-slate-700/60 text-[11px] text-slate-700 dark:text-slate-300 flex flex-wrap items-center justify-between gap-1">
+                <span className="font-semibold">
+                  Tusaale: Haddii macaamiilku gato {editCalculation.fractionalExample.qty} {editSellingUnit.toUpperCase()}:
+                </span>
+                <div className="flex items-center gap-3 font-mono">
+                  <span>Iib: <strong>${editCalculation.fractionalExample.revenue.toFixed(2)}</strong></span>
+                  <span>Cost: <strong>${editCalculation.fractionalExample.cost.toFixed(3)}</strong></span>
+                  <span>Faa'iido: <strong className={editCalculation.fractionalExample.exactProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}>
+                    ${editCalculation.fractionalExample.exactProfit.toFixed(3)} (Display: ${editCalculation.fractionalExample.displayProfit.toFixed(2)})
+                  </strong></span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* MINIMUM STOCK THRESHOLD */}
+          <div className="grid grid-cols-1 gap-3">
+            <div>
+              <label className="font-medium text-slate-600 dark:text-slate-400">Heerka Digniinta Kaydka (Min Stock Alert)</label>
+              <Input
+                type="number"
+                value={editMinStock}
+                onChange={(e) => setEditMinStock(e.target.value)}
+                className="mt-1 font-mono"
+              />
+            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-3">

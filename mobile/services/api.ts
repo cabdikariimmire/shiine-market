@@ -1059,7 +1059,7 @@ class MobileApiService {
 
     for (const v of variants || []) {
       const qty = Math.max(0, Number(v.stock_quantity || 0));
-      const unitCost = calculateCostPerBaseUnit(Number(v.buy_price || 0), Number(v.conversion_factor || 1));
+      const unitCost = v.cost_per_unit || calculateCostPerBaseUnit(Number(v.buy_price || 0), Number(v.conversion_factor || 1), v);
       const unitPrice = Number(v.sell_price || 0);
       stockCostValuation += qty * unitCost;
       stockRetailValuation += qty * unitPrice;

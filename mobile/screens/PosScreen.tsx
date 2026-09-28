@@ -143,7 +143,7 @@ export function PosScreen({ initialSelectedVariant, onClearInitialVariant }: Pos
 
       const cartLine = calculateCartItemLine(
         selectedVariant.sell_price,
-        calculateCostPerBaseUnit(selectedVariant.buy_price, selectedVariant.conversion_factor),
+        selectedVariant.cost_per_unit || calculateCostPerBaseUnit(selectedVariant.buy_price, selectedVariant.conversion_factor, selectedVariant),
         qty,
         0,
         'fixed',
@@ -162,7 +162,7 @@ export function PosScreen({ initialSelectedVariant, onClearInitialVariant }: Pos
         variant: selectedVariant,
         quantity: qty,
         unitPrice: selectedVariant.sell_price,
-        unitCost: calculateCostPerBaseUnit(selectedVariant.buy_price, selectedVariant.conversion_factor),
+        unitCost: selectedVariant.cost_per_unit || calculateCostPerBaseUnit(selectedVariant.buy_price, selectedVariant.conversion_factor, selectedVariant),
         discount: 0,
         totalPrice: cartLine.totalPrice,
         actual_quantity_used: qty,
@@ -199,7 +199,7 @@ export function PosScreen({ initialSelectedVariant, onClearInitialVariant }: Pos
     const isDenom = selectedVariant.pricing_mode === 'denomination' && Boolean(selectedVariant.sos_price);
     const cartLine = calculateCartItemLine(
       selectedVariant.sell_price,
-      calculateCostPerBaseUnit(selectedVariant.buy_price, selectedVariant.conversion_factor),
+      selectedVariant.cost_per_unit || calculateCostPerBaseUnit(selectedVariant.buy_price, selectedVariant.conversion_factor, selectedVariant),
       qty,
       0,
       isDenom ? 'denomination' : 'fixed',
@@ -238,7 +238,7 @@ export function PosScreen({ initialSelectedVariant, onClearInitialVariant }: Pos
         variant: selectedVariant,
         quantity: qty,
         unitPrice: selectedVariant.sell_price,
-        unitCost: calculateCostPerBaseUnit(selectedVariant.buy_price, selectedVariant.conversion_factor),
+        unitCost: selectedVariant.cost_per_unit || calculateCostPerBaseUnit(selectedVariant.buy_price, selectedVariant.conversion_factor, selectedVariant),
         discount: 0,
         totalPrice: cartLine.totalPrice,
         pricing_mode: selectedVariant.pricing_mode,

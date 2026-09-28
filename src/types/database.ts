@@ -34,6 +34,31 @@ export interface AmountSellingOption {
   pricing_mode?: 'fixed' | 'denomination' | string;
   default_qty?: number; // optional default/suggested liters
   default_liters?: number;
+  name?: string;
+  code?: string;
+  quantity_liters?: number;
+  display_price?: number;
+  payment_price?: number;
+  description?: string;
+  sort_order?: number;
+  is_active?: boolean;
+}
+
+export interface OilSellingMeasure {
+  id: string;
+  product_id?: string;
+  variant_id?: string;
+  name: string; // e.g. '1 Liter', '½ Liter', '¼ Weyn', '7K', '6K', '5K', '4K'
+  label: string; // for AmountSellingOption compatibility
+  code: string; // '1L', 'HALF_LITER', 'QUARTER_LARGE', '7K', '6K', '5K', '4K'
+  quantity_liters: number; // Exact physical quantity in liters
+  display_price: number; // Confirmed selling value
+  amount: number; // for AmountSellingOption compatibility
+  payment_price: number; // Selling value or payment price
+  currency?: '$' | 'SOS' | string;
+  description: string; // Hierarchy relationship description
+  sort_order: number;
+  is_active: boolean;
 }
 
 export interface ProductBatch {
@@ -206,7 +231,10 @@ export interface ProductVariant {
   container_capacity?: number | null; // e.g. 20 (liters per caag)
   container_capacity_liters?: number | null; // e.g. 20
   initial_containers?: number | null; // e.g. 4 (initial containers count)
-  selling_options?: AmountSellingOption[] | null; // money options for amount_based items
+  selling_options?: (AmountSellingOption | OilSellingMeasure)[] | null; // money or measure options for amount_based items
+  cost_per_unit?: number | null; // Exact calculated/persisted cost per selling unit (e.g. $0.43/pcs)
+  total_purchase_cost?: number | null; // Total purchase cost for the batch/stock-in
+  total_sellable_units?: number | null; // Total sellable units represented (e.g. 40 pcs)
   stock_quantity: number; // Stored in base selling units (e.g. 500 kg, 80 L, 10 Bac)
   minimum_stock: number; // In base selling units
   supplier_id?: string | null;

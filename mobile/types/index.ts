@@ -258,9 +258,11 @@ export interface CartItem {
   pricing_mode?: 'fixed' | 'denomination';
   sosPrice?: number | null;
   actual_quantity_used?: number;
-  selling_method?: 'liter' | 'money';
+  selling_method?: 'liter' | 'money' | 'measure';
   selling_option_label?: string;
   amount_based_currency?: 'SOS' | 'USD';
   amount_based_value?: number;
+  customer_payment?: number;
+  change_amount?: number;
   batch_id?: string;
 }

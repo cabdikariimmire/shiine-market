@@ -43,7 +43,10 @@ import {
   calculateMinSellableQty, 
   calculateOilMoneyToLiters,
   getVariantStep,
-  isValidSellableQuantity 
+  isValidSellableQuantity,
+  calculateOilChange,
+  getDefaultOilSellingMeasures,
+  OilSellingMeasure
 } from '@/lib/calculations/stock';
 import { AmountSellingOption, CartItem, Category, Customer, PaymentMethod, ProductVariant, Sale } from '@/types';
 import { 
@@ -90,16 +93,13 @@ export default function POSTerminalPage() {
   const [isBarcodeOpen, setIsBarcodeOpen] = useState(false);
   const [completedSale, setCompletedSale] = useState<Sale | null>(null);
 
-  // Oil / Amount-Based Selling Modal State (Dual Mode: Liter & Money)
+  // Oil / Selling Measure Modal State (Predefined Measures & Direct Liter)
   const [isOilModalOpen, setIsOilModalOpen] = useState(false);
   const [selectedOilVariant, setSelectedOilVariant] = useState<ProductVariant | null>(null);
-  const [oilSellingMethod, setOilSellingMethod] = useState<'liter' | 'money'>('money');
+  const [oilSellingMethod, setOilSellingMethod] = useState<'measure' | 'liter'>('measure');
   const [oilLiterQuantity, setOilLiterQuantity] = useState<string>('1');
-  const [selectedOilOption, setSelectedOilOption] = useState<AmountSellingOption | null>(null);
-  const [isCustomOilOption, setIsCustomOilOption] = useState(false);
-  const [customOilLabel, setCustomOilLabel] = useState('');
-  const [customOilAmount, setCustomOilAmount] = useState('');
-  const [customOilCurrency, setCustomOilCurrency] = useState<'$' | 'SOS'>('SOS');
+  const [selectedOilMeasure, setSelectedOilMeasure] = useState<OilSellingMeasure | null>(null);
+  const [oilPaymentAmount, setOilPaymentAmount] = useState<string>('');
 
   const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
 
@@ -200,6 +200,7 @@ export default function POSTerminalPage() {
       if (getItemKey(i) === itemKey) {
         const isOil = i.variant?.management_mode === 'amount_based' || i.actual_quantity_used !== undefined;
         const isOilLiter = isOil && i.selling_method === 'liter';
+        const isOilMeasure = isOil && i.selling_method === 'measure';
         const pMode = i.pricing_mode || i.variant?.pricing_mode || 'fixed';
         const sPrice = i.sosPrice ?? i.variant?.sos_price;
         const costPerBase = i.unitCost;
@@ -214,6 +215,22 @@ export default function POSTerminalPage() {
             quantityInput: quantityInput !== undefined ? quantityInput : String(quantity),
             actual_quantity_used: quantity,
             selling_option_label: `${quantity} L`,
+            totalPrice: lineTotal,
+            grossProfit: lineProfit,
+          };
+        }
+
+        if (isOilMeasure) {
+          const baseLiters = (i.actual_quantity_used || 0) / (i.quantity || 1);
+          const totalLiters = Number((baseLiters * quantity).toFixed(4));
+          const lineTotal = Math.round(quantity * i.unitPrice * 100) / 100;
+          const lineCost = Math.round(totalLiters * costPerBase * 100) / 100;
+          const lineProfit = Math.round((lineTotal - lineCost) * 100) / 100;
+          return {
+            ...i,
+            quantity,
+            quantityInput: quantityInput !== undefined ? quantityInput : String(quantity),
+            actual_quantity_used: totalLiters,
             totalPrice: lineTotal,
             grossProfit: lineProfit,
           };
@@ -253,37 +270,27 @@ export default function POSTerminalPage() {
     }));
   };
 
-  // Open Oil Selling Modal for amount_based products (Dual Mode: Liter & Money)
+  // Open Oil Selling Modal for amount_based products (Predefined Measures & Direct Liter)
   const openOilModal = (variant: ProductVariant) => {
     if (variant.stock_quantity <= 0) {
       error(`Lama iibin karo — "${variant.product?.name} (${variant.variant_name})" way dhammaatay (🔴 Out of Stock)!`);
       return;
     }
     setSelectedOilVariant(variant);
-    setOilSellingMethod('money');
+    setOilSellingMethod('measure');
     setOilLiterQuantity('1');
 
-    const defaultOptions: AmountSellingOption[] = (variant.selling_options && variant.selling_options.length > 0)
-      ? variant.selling_options
-      : [
-          { id: 'opt-3k', label: '3,000 SOS', amount: 3000, currency: 'SOS' },
-          { id: 'opt-4k', label: '4,000 SOS', amount: 4000, currency: 'SOS' },
-          { id: 'opt-5k', label: '5,000 SOS', amount: 5000, currency: 'SOS' },
-          { id: 'opt-6k', label: '6,000 SOS', amount: 6000, currency: 'SOS' },
-          { id: 'opt-7k', label: '7,000 SOS', amount: 7000, currency: 'SOS' },
-          { id: 'opt-rubac-50', label: 'Rubac weyn $0.50', amount: 0.50, currency: '$' },
-          { id: 'opt-rubac-45', label: 'Rubac weyn $0.45', amount: 0.45, currency: '$' },
-        ];
-    
-    const initialOpt = defaultOptions.find(o => o.amount === 5000) || defaultOptions[0];
-    setSelectedOilOption(initialOpt);
-    setIsCustomOilOption(false);
-    setCustomOilLabel('');
-    setCustomOilAmount('');
+    const measures: OilSellingMeasure[] = (variant.selling_options && variant.selling_options.length > 0)
+      ? (variant.selling_options as OilSellingMeasure[])
+      : getDefaultOilSellingMeasures(variant.sell_price);
+
+    const initialMeasure = measures[0] || null;
+    setSelectedOilMeasure(initialMeasure);
+    setOilPaymentAmount(initialMeasure ? initialMeasure.payment_price.toFixed(2) : '');
     setIsOilModalOpen(true);
   };
 
-  // Add Oil Option or Liter Sale to Cart
+  // Add Oil Measure or Liter Sale to Cart
   const handleAddOilToCart = () => {
     if (!selectedOilVariant) return;
 
@@ -293,7 +300,7 @@ export default function POSTerminalPage() {
 
     const availableStock = selectedOilVariant.stock_quantity;
     const remainingStock = Number((availableStock - currentUsageOthers).toFixed(4));
-    const costPerBase = calculateCostPerBaseUnit(selectedOilVariant.buy_price, selectedOilVariant.conversion_factor);
+    const costPerBase = selectedOilVariant.cost_per_unit || calculateCostPerBaseUnit(selectedOilVariant.buy_price, selectedOilVariant.conversion_factor, selectedOilVariant);
 
     if (oilSellingMethod === 'liter') {
       const parsedLiters = parseFloat(oilLiterQuantity);
@@ -317,7 +324,7 @@ export default function POSTerminalPage() {
         ...prev,
         {
           cartItemId,
-          product: selectedOilVariant.product || { id: selectedOilVariant.product_id, name: 'Cooking Oil', created_at: '', updated_at: '' },
+          product: selectedOilVariant.product || { id: selectedOilVariant.product_id, name: 'Saliid', created_at: '', updated_at: '' },
           variant: selectedOilVariant,
           quantity: parsedLiters,
           quantityInput: String(parsedLiters),
@@ -336,77 +343,62 @@ export default function POSTerminalPage() {
       setIsOilModalOpen(false);
       success(`Ku daray dambiisha: ${selectedOilVariant.product?.name || 'Saliid'} (${parsedLiters} L - ${formatMoney(lineTotal)})`);
     } else {
-      let opt: AmountSellingOption;
-      if (isCustomOilOption) {
-        const customAmt = parseFloat(customOilAmount);
-        if (isNaN(customAmt) || customAmt <= 0) {
-          error('Fadlan geli qiimaha lacagta saxda ah');
-          return;
-        }
-        opt = {
-          id: `custom-${Date.now()}`,
-          label: customOilLabel.trim() || `${customAmt} ${customOilCurrency}`,
-          amount: customAmt,
-          currency: customOilCurrency,
-          pricing_mode: customOilCurrency === 'SOS' ? 'denomination' : 'fixed',
-        };
-      } else {
-        if (!selectedOilOption) {
-          error('Fadlan dooro ikhtiyaarka lacagta');
-          return;
-        }
-        opt = selectedOilOption;
+      if (!selectedOilMeasure) {
+        error('Fadlan dooro cabbirka saliidda');
+        return;
       }
 
-      const calc = calculateOilMoneyToLiters(opt.amount, opt.currency || 'SOS', selectedOilVariant.sell_price);
-      const calculatedLiters = calc.litersSold;
-
-      if (calculatedLiters <= 0) {
+      if (selectedOilMeasure.quantity_liters <= 0) {
         error('Qiyaasta litirrada ma noqon karto 0');
         return;
       }
 
-      if (calculatedLiters > remainingStock) {
-        error(`Stock-ga saliidda kuma filna! Waxaa haray kaliya ${remainingStock} L, laakiin xaddiga lacagtan u dhigma waa ${calculatedLiters} L.`);
+      if (selectedOilMeasure.quantity_liters > remainingStock) {
+        error(`Stock-ga saliidda kuma filna! Waxaa haray kaliya ${remainingStock} L, laakiin cabbirkani wuxuu u baahan yahay ${selectedOilMeasure.quantity_liters} L.`);
         return;
       }
 
-      const isSos = opt.currency === 'SOS';
-      const pMode: 'fixed' | 'denomination' = isSos ? 'denomination' : 'fixed';
-      const sPrice = isSos ? opt.amount : null;
-      const uPrice = calc.amountUsd;
-      const lineCost = Math.round(calculatedLiters * costPerBase * 100) / 100;
-      const lineProfit = Math.round((uPrice - lineCost) * 100) / 100;
+      const paidVal = parseFloat(oilPaymentAmount);
+      const customerPayment = !isNaN(paidVal) && paidVal > 0 ? paidVal : selectedOilMeasure.payment_price;
 
-      const cartItemId = `${selectedOilVariant.id}_money_${opt.id}_${Date.now()}`;
+      if (customerPayment < selectedOilMeasure.payment_price) {
+        error(`Lacagta la bixiyay ($${customerPayment.toFixed(2)}) way ka yar tahay qiimaha cabbirka ($${selectedOilMeasure.payment_price.toFixed(2)})!`);
+        return;
+      }
+
+      const change = calculateOilChange(customerPayment, selectedOilMeasure.payment_price);
+      const lineTotal = selectedOilMeasure.payment_price;
+      const lineCost = Math.round(selectedOilMeasure.quantity_liters * costPerBase * 100) / 100;
+      const lineProfit = Math.round((lineTotal - lineCost) * 100) / 100;
+
+      const cartItemId = `${selectedOilVariant.id}_measure_${selectedOilMeasure.code || selectedOilMeasure.id}_${Date.now()}`;
 
       setCart(prev => [
         ...prev,
         {
           cartItemId,
-          product: selectedOilVariant.product || { id: selectedOilVariant.product_id, name: 'Cooking Oil', created_at: '', updated_at: '' },
+          product: selectedOilVariant.product || { id: selectedOilVariant.product_id, name: 'Saliid', created_at: '', updated_at: '' },
           variant: selectedOilVariant,
           quantity: 1,
           quantityInput: '1',
-          actual_quantity_used: calculatedLiters,
-          selling_method: 'money',
-          selling_option_label: opt.label,
-          selling_option_id: opt.id,
-          amount_based_currency: opt.currency === 'SOS' ? 'SOS' : 'USD',
-          amount_based_value: opt.amount,
-          unitPrice: uPrice,
+          actual_quantity_used: selectedOilMeasure.quantity_liters,
+          selling_method: 'measure',
+          selling_option_label: `${selectedOilMeasure.name} (${selectedOilMeasure.quantity_liters}L)`,
+          selling_option_id: selectedOilMeasure.id,
+          customer_payment: customerPayment,
+          change_amount: change.changeUsd,
+          unitPrice: selectedOilMeasure.payment_price,
           unitCost: costPerBase,
-          pricing_mode: pMode,
-          sosPrice: sPrice,
-          sosTotal: isSos ? opt.amount : undefined,
+          pricing_mode: 'fixed',
           discount: 0,
-          totalPrice: uPrice,
+          totalPrice: lineTotal,
           grossProfit: lineProfit,
         }
       ]);
 
       setIsOilModalOpen(false);
-      success(`Ku daray dambiisha: ${selectedOilVariant.product?.name || 'Saliid'} (${opt.label} -> ${calculatedLiters} L)`);
+      const changeMsg = change.changeUsd > 0 ? ` (Celis: $${change.changeUsd.toFixed(2)} / ${formatSos(change.changeSos)} SOS)` : '';
+      success(`Ku daray dambiisha: ${selectedOilVariant.product?.name || 'Saliid'} (${selectedOilMeasure.name} - ${formatMoney(lineTotal)})${changeMsg}`);
     }
   };
 
@@ -426,7 +418,7 @@ export default function POSTerminalPage() {
       return;
     }
 
-    if (!isPackBased && variant.stock_quantity < step) {
+    if (variant.stock_quantity < step) {
       error(`Lama iibin karo — Kaydka haray (${variant.stock_quantity} ${variant.selling_unit}) wuxuu ka yar yahay qiyaasta ugu yar ee la iibin karo (${step} ${variant.selling_unit}).`);
       return;
     }
@@ -434,7 +426,7 @@ export default function POSTerminalPage() {
     // Default quantity when adding is 1 (or step for bulk fractional)
     const defaultAdd = customAddQty !== undefined 
       ? customAddQty 
-      : (isPackBased ? 1 : (variant.stock_quantity < 1 ? step : 1));
+      : (variant.stock_quantity < 1 ? step : 1);
 
     const existingIndex = cart.findIndex(item => item.variant.id === variant.id && !item.actual_quantity_used);
     const existingQty = existingIndex !== -1 ? cart[existingIndex].quantity : 0;
@@ -445,15 +437,13 @@ export default function POSTerminalPage() {
       return;
     }
 
-    if (!isPackBased) {
-      const validation = isValidSellableQuantity(targetQty, step, variant.selling_unit);
-      if (!validation.valid) {
-        error(validation.reason || 'Tirada ma aha qeyb sax ah');
-        return;
-      }
+    const validation = isValidSellableQuantity(targetQty, step, variant.selling_unit, variant.management_mode);
+    if (!validation.valid) {
+      error(validation.reason || 'Tirada ma aha qeyb sax ah');
+      return;
     }
 
-    const costPerBase = calculateCostPerBaseUnit(variant.buy_price, variant.conversion_factor);
+    const costPerBase = variant.cost_per_unit || calculateCostPerBaseUnit(variant.buy_price, variant.conversion_factor, variant);
     const pMode = variant.pricing_mode || 'fixed';
     const sPrice = variant.sos_price;
 
@@ -503,8 +493,7 @@ export default function POSTerminalPage() {
   // Quantity Increment (+) button
   const handleIncrement = (item: CartItem) => {
     const itemKey = getItemKey(item);
-    const isPackBased = item.variant.management_mode === 'pack_based';
-    const step = isPackBased ? 1 : getVariantStep(item.variant);
+    const step = getVariantStep(item.variant);
     const targetQty = Number((item.quantity + step).toFixed(4));
 
     if (targetQty > item.variant.stock_quantity) {
@@ -519,8 +508,7 @@ export default function POSTerminalPage() {
   // Quantity Decrement (-) button
   const handleDecrement = (item: CartItem) => {
     const itemKey = getItemKey(item);
-    const isPackBased = item.variant.management_mode === 'pack_based';
-    const step = isPackBased ? 1 : getVariantStep(item.variant);
+    const step = getVariantStep(item.variant);
     const targetQty = Number((item.quantity - step).toFixed(4));
 
     if (targetQty < step - 0.0001) {
@@ -577,8 +565,7 @@ export default function POSTerminalPage() {
     const item = cart.find(i => getItemKey(i) === itemKey);
     if (!item) return;
 
-    const isPackBased = item.variant.management_mode === 'pack_based';
-    const step = isPackBased ? 1 : getVariantStep(item.variant);
+    const step = getVariantStep(item.variant);
     const rawVal = item.quantityInput !== undefined ? item.quantityInput.trim() : String(item.quantity);
     const parsed = parseFloat(rawVal);
 
@@ -601,15 +588,13 @@ export default function POSTerminalPage() {
       return;
     }
 
-    if (!isPackBased) {
-      const validation = isValidSellableQuantity(parsed, step, item.variant.selling_unit);
-      if (!validation.valid) {
-        error(validation.reason || 'Tirada ma aha qeyb sax ah');
-        const snapped = Number((Math.max(1, Math.round(parsed / step)) * step).toFixed(4));
-        const safeSnapped = Math.min(item.variant.stock_quantity, snapped);
-        updateCartItemQuantity(itemKey, safeSnapped, String(safeSnapped));
-        return;
-      }
+    const validation = isValidSellableQuantity(parsed, step, item.variant.selling_unit, item.variant.management_mode);
+    if (!validation.valid) {
+      error(validation.reason || 'Tirada ma aha qeyb sax ah');
+      const snapped = Number((Math.max(1, Math.round(parsed / step)) * step).toFixed(4));
+      const safeSnapped = Math.min(item.variant.stock_quantity, snapped);
+      updateCartItemQuantity(itemKey, safeSnapped, String(safeSnapped));
+      return;
     }
 
     const safeQty = Number(parsed.toFixed(4));
@@ -650,10 +635,10 @@ export default function POSTerminalPage() {
     // Strict validation of fractional units, oil liters and remaining stock before submission
     for (const item of cart) {
       const isOil = item.variant?.management_mode === 'amount_based' || item.actual_quantity_used !== undefined;
-      const isPack = item.variant?.management_mode === 'pack_based';
-      const step = isPack ? 1 : getVariantStep(item.variant);
+      const isMoneyOil = Boolean(item.selling_option_label || (item as any).amount_based_value);
+      const step = getVariantStep(item.variant);
 
-      if (isOil) {
+      if (isOil && isMoneyOil) {
         const liters = item.actual_quantity_used !== undefined ? Number(item.actual_quantity_used) : 0;
         if (liters <= 0) {
           error(`Qalad qiyaasta litirrada: "${item.product.name}" (${item.selling_option_label || 'Saliid'}) — Fadlan geli qiyaas sax ah.`);
@@ -664,12 +649,10 @@ export default function POSTerminalPage() {
           error(`Qalad tirada: "${item.product.name}" (${item.variant.variant_name}) — Fadlan geli tiro sax ah.`);
           return;
         }
-        if (!isPack) {
-          const val = isValidSellableQuantity(item.quantity, step, item.variant.selling_unit);
-          if (!val.valid) {
-            error(`Qalad tirada: "${item.product.name}" (${item.variant.variant_name}): ${val.reason}`);
-            return;
-          }
+        const val = isValidSellableQuantity(item.quantity, step, item.variant.selling_unit, item.variant.management_mode);
+        if (!val.valid) {
+          error(`Qalad tirada: "${item.product.name}" (${item.variant.variant_name}): ${val.reason}`);
+          return;
         }
       }
     }
@@ -899,22 +882,14 @@ export default function POSTerminalPage() {
   const oilRemaining = getOilRemainingStock(selectedOilVariant);
   const parsedLiterQty = parseFloat(oilLiterQuantity) || 0;
 
-  const currentOilOption = isCustomOilOption 
-    ? {
-        id: 'custom',
-        label: customOilLabel || `${customOilAmount} ${customOilCurrency}`,
-        amount: parseFloat(customOilAmount) || 0,
-        currency: customOilCurrency,
-      }
-    : selectedOilOption;
+  const currentOilMeasures: OilSellingMeasure[] = (selectedOilVariant?.selling_options && selectedOilVariant.selling_options.length > 0)
+    ? (selectedOilVariant.selling_options as OilSellingMeasure[])
+    : getDefaultOilSellingMeasures(selectedOilVariant?.sell_price || 1.85);
 
-  const currentOilCalc = (selectedOilVariant && currentOilOption && currentOilOption.amount > 0)
-    ? calculateOilMoneyToLiters(currentOilOption.amount, currentOilOption.currency || 'SOS', selectedOilVariant.sell_price)
-    : { amountUsd: 0, litersSold: 0, displayText: '0 L' };
-
+  const activeOilMeasure = selectedOilMeasure || currentOilMeasures[0] || null;
   const isOilLiterStockExceeded = oilSellingMethod === 'liter' && (parsedLiterQty <= 0 || parsedLiterQty > oilRemaining);
-  const isOilMoneyStockExceeded = oilSellingMethod === 'money' && (currentOilCalc.litersSold <= 0 || currentOilCalc.litersSold > oilRemaining);
-  const isOilStockExceeded = isOilLiterStockExceeded || isOilMoneyStockExceeded;
+  const isOilMeasureStockExceeded = oilSellingMethod === 'measure' && (activeOilMeasure ? activeOilMeasure.quantity_liters > oilRemaining : false);
+  const isOilStockExceeded = isOilLiterStockExceeded || isOilMeasureStockExceeded;
 
   return (
     <AppShell title="Iibka / POS">
@@ -983,7 +958,7 @@ export default function POSTerminalPage() {
               </div>
             ) : (
               variants.map((v) => {
-                const costPerBase = calculateCostPerBaseUnit(v.buy_price, v.conversion_factor);
+                const costPerBase = v.cost_per_unit || calculateCostPerBaseUnit(v.buy_price, v.conversion_factor, v);
                 const profit = calculateUnitProfit(v.sell_price, costPerBase);
                 const isOutOfStock = v.stock_quantity <= 0;
                 const minSellable = getVariantStep(v);
@@ -1205,7 +1180,14 @@ export default function POSTerminalPage() {
 
                         <p className="text-[10px] text-slate-400 font-mono">
                           {isOil ? (
-                            <>Qiyaasta: <strong className="text-slate-800 dark:text-slate-200 font-bold">{item.actual_quantity_used} L</strong> | Qiimaha: {item.selling_option_label}</>
+                            <>
+                              Qiyaasta: <strong className="text-slate-800 dark:text-slate-200 font-bold">{item.actual_quantity_used} L</strong> | Qiimaha: {item.selling_option_label}
+                              {item.change_amount !== undefined && item.change_amount > 0 && (
+                                <span className="text-emerald-700 dark:text-emerald-400 font-bold ml-1">
+                                  | Bixiyay: ${item.customer_payment?.toFixed(2)} (Celis: ${item.change_amount.toFixed(2)} / {formatSos(item.change_amount * 20000)} SOS)
+                                </span>
+                              )}
+                            </>
                           ) : item.pricing_mode === 'denomination' ? (
                             <>Qiimaha: {formatSos(item.sosPrice || 0)} SOS/{item.variant.selling_unit} (${formatMoney(item.unitPrice)})</>
                           ) : (
@@ -1512,7 +1494,7 @@ export default function POSTerminalPage() {
             Iibka Saliidda (Cooking Oil POS)
           </DialogTitle>
           <DialogDescription>
-            Dooro habka iibka: <strong>Litir toos ah (Liter)</strong> ama <strong>Lacag go'an (Money: 3k, 4k, 5k, Rubac...)</strong>
+            Dooro cabbirka la doonayo (1L, ½L, ¼ Weyn, 7K, 6K, 5K, 4K) ama geli litir toos ah.
           </DialogDescription>
         </DialogHeader>
 
@@ -1525,7 +1507,7 @@ export default function POSTerminalPage() {
                   {selectedOilVariant.product?.name} ({selectedOilVariant.variant_name})
                 </p>
                 <p className="text-[11px] text-slate-500 mt-0.5">
-                  Qiimaha Litirka: <strong className="text-emerald-700 dark:text-emerald-300 font-mono font-bold">${selectedOilVariant.sell_price.toFixed(2)} / L</strong>
+                  Qiimaha 1 Liter: <strong className="text-emerald-700 dark:text-emerald-300 font-mono font-bold">${selectedOilVariant.sell_price.toFixed(2)} / L</strong>
                 </p>
               </div>
               <div className="text-right">
@@ -1536,8 +1518,21 @@ export default function POSTerminalPage() {
               </div>
             </div>
 
-            {/* Two Selling Methods Segmented Tab Switcher */}
+            {/* Selling Method Tabs */}
             <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
+              <button
+                type="button"
+                onClick={() => setOilSellingMethod('measure')}
+                className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-bold transition-all ${
+                  oilSellingMethod === 'measure'
+                    ? 'bg-amber-600 text-white shadow-xs font-black'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                <DollarSign className="h-3.5 w-3.5" />
+                <span>Cabbirrada Saliidda (Measures)</span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => setOilSellingMethod('liter')}
@@ -1548,24 +1543,180 @@ export default function POSTerminalPage() {
                 }`}
               >
                 <Droplet className="h-3.5 w-3.5" />
-                <span>SECTION 1: BY LITER</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setOilSellingMethod('money')}
-                className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-bold transition-all ${
-                  oilSellingMethod === 'money'
-                    ? 'bg-amber-600 text-white shadow-xs font-black'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                }`}
-              >
-                <DollarSign className="h-3.5 w-3.5" />
-                <span>SECTION 2: BY MONEY</span>
+                <span>Litir Toos ah (Direct Liter)</span>
               </button>
             </div>
 
-            {/* SECTION 1: BY LITER */}
+            {/* TAB 1: PREDEFINED SELLING MEASURES */}
+            {oilSellingMethod === 'measure' && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="font-bold text-slate-800 dark:text-slate-200 text-xs">
+                    Dooro Cabbirka Saliidda:
+                  </label>
+                  <span className="text-[11px] text-slate-400 font-mono">
+                    7 Cabbir oo Diyaarsan
+                  </span>
+                </div>
+
+                {/* 7 Selling Measures Cards */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {currentOilMeasures.map((measure) => {
+                    const isSelected = (activeOilMeasure?.code === measure.code) || (activeOilMeasure?.name === measure.name);
+
+                    return (
+                      <button
+                        key={measure.code || measure.name}
+                        type="button"
+                        onClick={() => {
+                          setSelectedOilMeasure(measure);
+                          setOilPaymentAmount(measure.payment_price.toFixed(2));
+                        }}
+                        className={`p-2.5 rounded-xl border text-left transition-all flex flex-col justify-between ${
+                          isSelected
+                            ? 'border-amber-600 bg-amber-500 text-white shadow-xs font-black'
+                            : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-amber-400 text-slate-800 dark:text-slate-200'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between w-full">
+                          <span className="text-xs font-black">{measure.name}</span>
+                          <span className={`text-xs font-mono font-bold ${isSelected ? 'text-amber-100' : 'text-emerald-700 dark:text-emerald-400'}`}>
+                            ${measure.payment_price.toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="mt-1 flex items-center justify-between w-full text-[10px] font-mono">
+                          <span className={isSelected ? 'text-amber-100' : 'text-slate-500 dark:text-slate-400'}>
+                            {measure.quantity_liters} L
+                          </span>
+                          {measure.description && (
+                            <span className={`text-[9px] truncate max-w-[80px] ${isSelected ? 'text-amber-200' : 'text-slate-400'}`} title={measure.description}>
+                              {measure.description}
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Payment Input and Change Calculation */}
+                {(() => {
+                  const activeM = activeOilMeasure;
+                  const measurePrice = activeM ? activeM.payment_price : 0;
+                  const paidVal = parseFloat(oilPaymentAmount);
+                  const effectivePaid = !isNaN(paidVal) && paidVal > 0 ? paidVal : measurePrice;
+                  const changeCalc = calculateOilChange(effectivePaid, measurePrice);
+                  const isUnderpaid = effectivePaid < measurePrice;
+                  const isStockShort = activeM ? activeM.quantity_liters > oilRemaining : false;
+
+                  return (
+                    <div className="space-y-2.5 pt-1">
+                      {/* Customer Payment Field */}
+                      <div className="p-3 bg-slate-50 dark:bg-slate-800/40 rounded-xl border border-slate-200 dark:border-slate-700 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <label className="font-bold text-slate-800 dark:text-slate-200 text-xs">
+                            Lacagta Macmiilku Bixiyay ($ / USD):
+                          </label>
+                          <span className="text-[11px] font-mono text-slate-500">
+                            Qiimaha Cabbirka: <strong className="text-slate-900 dark:text-white">${measurePrice.toFixed(2)}</strong>
+                          </span>
+                        </div>
+
+                        <div className="relative">
+                          <span className="absolute left-3 top-2.5 text-sm font-bold text-slate-400">$</span>
+                          <Input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            placeholder={measurePrice.toFixed(2)}
+                            value={oilPaymentAmount}
+                            onChange={(e) => setOilPaymentAmount(e.target.value)}
+                            className="pl-7 h-10 font-mono font-black text-sm bg-white dark:bg-slate-900"
+                          />
+                        </div>
+
+                        {/* Quick Payment Chips */}
+                        <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                          <span className="text-[10px] text-slate-400 font-bold mr-1">Dhaqso:</span>
+                          {[
+                            { label: `Sax ($${measurePrice.toFixed(2)})`, val: measurePrice },
+                            { label: '$0.20', val: 0.20 },
+                            { label: '$0.25', val: 0.25 },
+                            { label: '$0.50', val: 0.50 },
+                            { label: '$1.00', val: 1.00 },
+                            { label: '$2.00', val: 2.00 },
+                          ].filter(c => c.val >= measurePrice || c.val === measurePrice).slice(0, 5).map(chip => (
+                            <button
+                              key={chip.label}
+                              type="button"
+                              onClick={() => setOilPaymentAmount(chip.val.toFixed(2))}
+                              className="px-2.5 py-1 rounded-md text-[11px] font-mono font-bold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-amber-400 hover:bg-amber-50/50"
+                            >
+                              {chip.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Live Calculation: Qiimaha, La Dhiibay, Celis */}
+                      <div className="p-3 bg-amber-50/70 dark:bg-amber-950/30 rounded-xl border border-amber-200 dark:border-amber-800 space-y-2">
+                        <div className="grid grid-cols-3 gap-2 text-center">
+                          <div className="p-2 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800">
+                            <span className="text-[10px] text-slate-400 block font-medium">Qiimaha Cabbirka</span>
+                            <span className="text-xs font-black font-mono text-slate-900 dark:text-white">
+                              ${measurePrice.toFixed(2)}
+                            </span>
+                          </div>
+                          <div className="p-2 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800">
+                            <span className="text-[10px] text-slate-400 block font-medium">Lacagta La Bixiyay</span>
+                            <span className="text-xs font-black font-mono text-slate-900 dark:text-white">
+                              ${effectivePaid.toFixed(2)}
+                            </span>
+                          </div>
+                          <div className={`p-2 rounded-lg border ${
+                            changeCalc.changeUsd > 0 
+                              ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-300 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200' 
+                              : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-600'
+                          }`}>
+                            <span className="text-[10px] text-slate-400 block font-medium">Celis (Cash)</span>
+                            <span className="text-xs font-black font-mono">
+                              ${changeCalc.changeUsd.toFixed(2)}
+                            </span>
+                          </div>
+                        </div>
+
+                        {changeCalc.changeUsd > 0 && (
+                          <div className="p-2 bg-emerald-100/80 dark:bg-emerald-950/60 rounded-lg border border-emerald-300 dark:border-emerald-800 flex items-center justify-between text-xs text-emerald-900 dark:text-emerald-200 font-bold">
+                            <span>U Celi Macmiilka (Change):</span>
+                            <span className="font-mono font-black text-sm">
+                              ${changeCalc.changeUsd.toFixed(2)} = {formatSos(changeCalc.changeSos)} SOS
+                            </span>
+                          </div>
+                        )}
+
+                        {isUnderpaid && (
+                          <div className="p-2 bg-red-100 dark:bg-red-950/60 border border-red-300 dark:border-red-800 rounded-lg flex items-center gap-2 text-red-700 dark:text-red-300 text-[11px] font-bold">
+                            <AlertTriangle className="h-4 w-4 shrink-0" />
+                            <span>Lacagta la bixiyay way ka yar tahay qiimaha cabbirka!</span>
+                          </div>
+                        )}
+
+                        {isStockShort && (
+                          <div className="p-2 bg-red-100 dark:bg-red-950/60 border border-red-300 dark:border-red-800 rounded-lg flex items-center gap-2 text-red-700 dark:text-red-300 text-[11px] font-bold">
+                            <AlertTriangle className="h-4 w-4 shrink-0" />
+                            <span>
+                              Stock-ga saliidda kuma filna! Waxaa haray kaliya {oilRemaining} L, laakiin cabbirkani wuxuu u baahan yahay {activeM?.quantity_liters} L.
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+
+            {/* TAB 2: DIRECT BY LITER */}
             {oilSellingMethod === 'liter' && (
               <div className="p-3.5 bg-slate-50 dark:bg-slate-800/40 rounded-xl border border-emerald-200 dark:border-emerald-900/60 space-y-3">
                 <div className="flex items-center justify-between">
@@ -1638,137 +1789,6 @@ export default function POSTerminalPage() {
                 )}
               </div>
             )}
-
-            {/* SECTION 2: BY MONEY AMOUNT */}
-            {oilSellingMethod === 'money' && (
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="font-bold text-slate-800 dark:text-slate-200 text-xs">
-                    Dooro Lacagta (Money Selling Option):
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => setIsCustomOilOption(!isCustomOilOption)}
-                    className="text-[11px] font-bold text-amber-700 dark:text-amber-400 hover:underline"
-                  >
-                    {isCustomOilOption ? '← Dooro Qiimo Diyaarsan' : '+ Geli Qiimo Kale'}
-                  </button>
-                </div>
-
-                {!isCustomOilOption ? (
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    {((selectedOilVariant.selling_options && selectedOilVariant.selling_options.length > 0)
-                      ? selectedOilVariant.selling_options
-                      : [
-                          { id: 'opt-3k', label: '3,000 SOS', amount: 3000, currency: 'SOS' },
-                          { id: 'opt-4k', label: '4,000 SOS', amount: 4000, currency: 'SOS' },
-                          { id: 'opt-5k', label: '5,000 SOS', amount: 5000, currency: 'SOS' },
-                          { id: 'opt-6k', label: '6,000 SOS', amount: 6000, currency: 'SOS' },
-                          { id: 'opt-7k', label: '7,000 SOS', amount: 7000, currency: 'SOS' },
-                          { id: 'opt-rubac-50', label: 'Rubac weyn $0.50', amount: 0.50, currency: '$' },
-                          { id: 'opt-rubac-45', label: 'Rubac weyn $0.45', amount: 0.45, currency: '$' },
-                        ]
-                    ).map((opt) => {
-                      const isSelected = selectedOilOption?.id === opt.id || selectedOilOption?.label === opt.label;
-                      const optCalc = calculateOilMoneyToLiters(opt.amount, opt.currency || 'SOS', selectedOilVariant.sell_price);
-
-                      return (
-                        <button
-                          key={opt.id || opt.label}
-                          type="button"
-                          onClick={() => setSelectedOilOption(opt)}
-                          className={`p-2.5 rounded-xl border text-left transition-all flex flex-col justify-between ${
-                            isSelected
-                              ? 'border-amber-600 bg-amber-500 text-white shadow-xs font-black'
-                              : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-amber-400 text-slate-800 dark:text-slate-200'
-                          }`}
-                        >
-                          <span className="text-xs font-bold">{opt.label}</span>
-                          <span className={`text-[10px] mt-1 font-mono font-bold ${isSelected ? 'text-amber-100' : 'text-amber-600 dark:text-amber-400'}`}>
-                            = {optCalc.litersSold} L
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="p-3 bg-slate-50 dark:bg-slate-800/40 rounded-xl border border-slate-200 dark:border-slate-700 space-y-2">
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">Lacagta (Amount) *</label>
-                        <Input
-                          type="number"
-                          placeholder="Tusaale: 5000 ama 0.50"
-                          value={customOilAmount}
-                          onChange={(e) => setCustomOilAmount(e.target.value)}
-                          className="mt-1 font-mono font-bold"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">Nooca Lacagta *</label>
-                        <select
-                          value={customOilCurrency}
-                          onChange={(e) => setCustomOilCurrency(e.target.value as any)}
-                          className="flex h-9 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1 text-xs mt-1"
-                        >
-                          <option value="SOS">SOS (Shilin Soomaali)</option>
-                          <option value="$">USD ($ Dollar)</option>
-                        </select>
-                      </div>
-                    </div>
-                    <div>
-                      <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">Magaca Ikhtiyaarka (Ikhtiyaari)</label>
-                      <Input
-                        placeholder="Tusaale: 5,000 SOS ama Rubac weyn"
-                        value={customOilLabel}
-                        onChange={(e) => setCustomOilLabel(e.target.value)}
-                        className="mt-1"
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {/* Dynamic Money-to-Liter Calculation Card */}
-                {(() => {
-                  const targetAmt = isCustomOilOption ? parseFloat(customOilAmount) || 0 : (selectedOilOption?.amount || 0);
-                  const targetCurr = isCustomOilOption ? customOilCurrency : (selectedOilOption?.currency || 'SOS');
-                  const calc = calculateOilMoneyToLiters(targetAmt, targetCurr, selectedOilVariant.sell_price);
-                  const isStockShort = calc.litersSold > oilRemaining;
-
-                  return (
-                    <div className="p-3 bg-amber-50 dark:bg-amber-950/40 rounded-xl border border-amber-200 dark:border-amber-800 space-y-2">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <span className="text-[11px] font-bold text-amber-900 dark:text-amber-200 block">
-                            Xaddiga Litirrada ee U Dhigma (Calculated Liters):
-                          </span>
-                          <span className="text-[10px] text-slate-500 font-mono">
-                            ${calc.amountUsd.toFixed(2)} ÷ ${selectedOilVariant.sell_price.toFixed(2)}/L = {calc.litersSold} L
-                          </span>
-                        </div>
-                        <div className="text-right">
-                          <span className="text-lg font-black font-mono text-amber-800 dark:text-amber-300 block">
-                            {calc.litersSold} L
-                          </span>
-                          <span className="text-[10px] text-slate-400 font-mono">
-                            Stock haraya: {Math.max(0, Number((oilRemaining - calc.litersSold).toFixed(4)))} L
-                          </span>
-                        </div>
-                      </div>
-
-                      {isStockShort && (
-                        <div className="p-2 bg-red-100 dark:bg-red-950/60 border border-red-300 dark:border-red-800 rounded-lg flex items-center gap-2 text-red-700 dark:text-red-300 text-[11px] font-bold">
-                          <AlertTriangle className="h-4 w-4 shrink-0" />
-                          <span>
-                            Stock-ga saliidda kuma filna! Waxaa haray kaliya {oilRemaining} L, laakiin lacagtani waxay u baahan tahay {calc.litersSold} L.
-                          </span>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })()}
-              </div>
-            )}
           </div>
         )}
 
@@ -1778,12 +1798,17 @@ export default function POSTerminalPage() {
           </Button>
           <Button
             onClick={handleAddOilToCart}
-            disabled={!selectedOilVariant || isOilStockExceeded || (oilSellingMethod === 'liter' && parsedLiterQty <= 0)}
+            disabled={
+              !selectedOilVariant || 
+              isOilStockExceeded || 
+              (oilSellingMethod === 'liter' && parsedLiterQty <= 0) ||
+              (oilSellingMethod === 'measure' && (!activeOilMeasure || (parseFloat(oilPaymentAmount) > 0 && parseFloat(oilPaymentAmount) < (activeOilMeasure?.payment_price || 0))))
+            }
             className="bg-emerald-600 hover:bg-emerald-700 text-white font-black"
           >
             {oilSellingMethod === 'liter'
-              ? `Ku dar Dambiisha (${parsedLiterQty} L - ${formatMoney(parsedLiterQty * (selectedOilVariant?.sell_price || 1.5))})`
-              : `Ku dar Dambiisha (${(isCustomOilOption ? customOilLabel || 'Lacag' : selectedOilOption?.label) || 'Lacag'} -> ${currentOilCalc.litersSold} L)`}
+              ? `Ku dar Dambiisha (${parsedLiterQty} L - ${formatMoney(parsedLiterQty * (selectedOilVariant?.sell_price || 1.85))})`
+              : `Ku dar Dambiisha (${activeOilMeasure?.name || 'Cabbir'} - ${formatMoney(activeOilMeasure?.payment_price || 0)})`}
           </Button>
         </DialogFooter>
       </Dialog>

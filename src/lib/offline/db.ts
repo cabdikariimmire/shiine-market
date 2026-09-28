@@ -104,7 +104,7 @@ export async function cacheProducts(variants: ProductVariant[]): Promise<void> {
 
     const now = Date.now();
     for (const v of variants) {
-      const calculatedUnitCost = calculateCostPerBaseUnit(v.buy_price, v.conversion_factor);
+      const calculatedUnitCost = v.cost_per_unit || calculateCostPerBaseUnit(v.buy_price, v.conversion_factor, v);
       const cached = {
         ...v,
         unit_cost: calculatedUnitCost,
