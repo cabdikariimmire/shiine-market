@@ -26,10 +26,12 @@ import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogBody, Dialo
 import { useToast } from '@/components/ui/toast';
 import { repository } from '@/lib/services/repository';
 import { formatMoney } from '@/lib/calculations/financials';
-import { Customer } from '@/types';
+import { formatDate } from '@/lib/utils';
+import { Customer, Debt } from '@/types';
 
 export default function CustomersPage() {
   const [customers, setCustomers] = useState<Customer[]>([]);
+  const [allDebts, setAllDebts] = useState<Debt[]>([]);
   const [search, setSearch] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [name, setName] = useState('');
@@ -49,8 +51,12 @@ export default function CustomersPage() {
 
   const loadData = useCallback(async () => {
     try {
-      const data = await repository.getCustomers(search);
+      const [data, debts] = await Promise.all([
+        repository.getCustomers(search),
+        repository.getDebts('all'),
+      ]);
       setCustomers(data);
+      setAllDebts(debts);
     } catch (err) {
       console.error('Error loading customers:', err);
     }
@@ -181,29 +187,54 @@ export default function CustomersPage() {
             <table className="w-full text-left text-xs sm:text-sm">
               <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200/80 dark:border-slate-800 text-slate-600 dark:text-slate-300 font-bold uppercase text-[11px] tracking-wider">
                 <tr>
-                  <th className="px-5 py-3.5">Macmiilka</th>
-                  <th className="px-5 py-3.5">Taleefanka</th>
-                  <th className="px-5 py-3.5">Cinwaanka</th>
-                  <th className="px-5 py-3.5 text-right">Daynta Guud</th>
-                  <th className="px-5 py-3.5 text-right">La Bixiyey</th>
-                  <th className="px-5 py-3.5 text-right">Haraaga Daynta</th>
-                  <th className="px-5 py-3.5 text-right">Hawlaha</th>
+                  <th className="px-4 py-3.5">Macmiilka</th>
+                  <th className="px-4 py-3.5">Taleefanka</th>
+                  <th className="px-4 py-3.5 text-right">Daynta Guud</th>
+                  <th className="px-4 py-3.5 text-right">La Bixiyey</th>
+                  <th className="px-4 py-3.5 text-right">Haraaga Daynta</th>
+                  <th className="px-4 py-3.5 text-center">Dayntii Hore</th>
+                  <th className="px-4 py-3.5 text-center">Xaaladda</th>
+                  <th className="px-4 py-3.5 text-right">Hawlaha</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-medium">
                 {customers.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="text-center py-12 text-slate-400">
+                    <td colSpan={8} className="text-center py-12 text-slate-400">
                       Macmiil laguma helin
                     </td>
                   </tr>
                 ) : (
                   customers.map((c) => {
-                    const hasDebt = (c.remaining_debt || 0) > 0;
+                    const totalD = Number(c.total_debt || 0);
+                    const paidD = Number(c.paid_debt || 0);
+                    const remainingD = Number(c.remaining_debt || 0);
+                    const hasDebt = remainingD > 0;
+
+                    const custDebts = allDebts.filter(d => d.customer_id === c.id);
+                    const hasOverdue = custDebts.some(d => d.status === 'overdue' && d.remaining_balance > 0);
+                    const lastDebt = custDebts[0];
+
+                    let statusLabel = 'Dayn Ma Laha';
+                    let statusClass = 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
+
+                    if (hasOverdue) {
+                      statusLabel = 'Daahday';
+                      statusClass = 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300 font-black animate-pulse';
+                    } else if (remainingD > 0 && paidD > 0) {
+                      statusLabel = 'Qayb ahaan';
+                      statusClass = 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 font-bold';
+                    } else if (remainingD > 0) {
+                      statusLabel = 'Dayn furan';
+                      statusClass = 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 font-bold';
+                    } else if (totalD > 0 && remainingD <= 0) {
+                      statusLabel = 'La bixiyey';
+                      statusClass = 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 font-bold';
+                    }
 
                     return (
                       <tr key={c.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40">
-                        <td className="px-5 py-4">
+                        <td className="px-4 py-4">
                           <Link href={`/customers/${c.id}`} className="font-bold text-slate-900 dark:text-white hover:underline">
                             {c.name}
                           </Link>
@@ -212,33 +243,39 @@ export default function CustomersPage() {
                           )}
                         </td>
 
-                        <td className="px-5 py-4 font-mono text-slate-600 dark:text-slate-300">
+                        <td className="px-4 py-4 font-mono text-slate-600 dark:text-slate-300">
                           {c.phone}
                         </td>
 
-                        <td className="px-5 py-4 text-slate-500">
-                          {c.address || '—'}
+                        <td className="px-4 py-4 text-right font-mono text-slate-500">
+                          {formatMoney(totalD)}
                         </td>
 
-                        <td className="px-5 py-4 text-right font-mono text-slate-500">
-                          {formatMoney(c.total_debt)}
+                        <td className="px-4 py-4 text-right font-mono text-emerald-600 font-bold">
+                          {formatMoney(paidD)}
                         </td>
 
-                        <td className="px-5 py-4 text-right font-mono text-emerald-600 font-bold">
-                          {formatMoney(c.paid_debt)}
-                        </td>
-
-                        <td className="px-5 py-4 text-right font-mono font-black text-base">
+                        <td className="px-4 py-4 text-right font-mono font-black text-base">
                           {hasDebt ? (
                             <span className="text-amber-600 dark:text-amber-400">
-                              {formatMoney(c.remaining_debt)}
+                              {formatMoney(remainingD)}
                             </span>
                           ) : (
                             <span className="text-slate-400 text-xs font-normal">Dayn Ma Laha ✓</span>
                           )}
                         </td>
 
-                        <td className="px-5 py-4 text-right">
+                        <td className="px-4 py-4 text-center font-mono text-xs text-slate-500 whitespace-nowrap">
+                          {lastDebt ? formatDate(lastDebt.created_at) : '—'}
+                        </td>
+
+                        <td className="px-4 py-4 text-center">
+                          <span className={`text-[10px] px-2.5 py-1 rounded-full ${statusClass}`}>
+                            {statusLabel}
+                          </span>
+                        </td>
+
+                        <td className="px-4 py-4 text-right">
                           <div className="flex items-center justify-end gap-1.5">
                             <Button
                               variant="ghost"

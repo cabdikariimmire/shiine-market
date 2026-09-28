@@ -361,6 +361,7 @@ export default function CustomerDetailPage() {
                   <tr>
                     <th className="px-5 py-3">Rasiidh #</th>
                     <th className="px-5 py-3">Taariikhda</th>
+                    <th className="px-5 py-3">Alaabta La Qaatay</th>
                     <th className="px-5 py-3 text-right">Wadarta Iibka</th>
                     <th className="px-5 py-3 text-right">Lacag La Bixiyey</th>
                     <th className="px-5 py-3 text-right">Daynta Qoran</th>
@@ -370,7 +371,7 @@ export default function CustomerDetailPage() {
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-medium">
                   {customerData.debts.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="text-center py-8 text-slate-400">
+                      <td colSpan={7} className="text-center py-8 text-slate-400">
                         Dayn lama hayo
                       </td>
                     </tr>
@@ -382,6 +383,9 @@ export default function CustomerDetailPage() {
                         </td>
                         <td className="px-5 py-3 text-slate-500 whitespace-nowrap">
                           {formatDate(d.created_at)}
+                        </td>
+                        <td className="px-5 py-3 text-xs text-slate-700 dark:text-slate-300 max-w-[250px] truncate" title={d.items_summary || ''}>
+                          {d.items_summary || 'Dayn Alaabeed'}
                         </td>
                         <td className="px-5 py-3 text-right font-mono font-bold text-slate-900 dark:text-white">
                           {formatMoney(d.original_amount)}

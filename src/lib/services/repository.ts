@@ -785,7 +785,7 @@ class ShopRepository {
     if (error || !cust) return null;
 
     const [debtsRes, paymentsRes, salesRes] = await Promise.all([
-      supabase.from('debts').select('*, payments:debt_payments(*)').eq('customer_id', id).order('created_at', { ascending: false }),
+      supabase.from('debts').select('*, payments:debt_payments(*), sale:sales(*, items:sale_items(*, product_variant:product_variants(*, product:products(*))))').eq('customer_id', id).order('created_at', { ascending: false }),
       supabase.from('debt_payments').select('*').eq('customer_id', id).order('created_at', { ascending: false }),
       supabase.from('sales').select('*').eq('customer_id', id).order('created_at', { ascending: false }),
     ]);
@@ -3272,7 +3272,7 @@ class ShopRepository {
   public async getDebts(statusFilter: string = 'all'): Promise<Debt[]> {
     let query = supabase
       .from('debts')
-      .select('*, customer:customers(*), sale:sales(*)')
+      .select('*, customer:customers(*), sale:sales(*, items:sale_items(*, product_variant:product_variants(*, product:products(*)))), payments:debt_payments(*)')
       .order('created_at', { ascending: false });
 
     if (statusFilter && statusFilter !== 'all') {
@@ -3290,7 +3290,7 @@ class ShopRepository {
   public async getDebtById(id: string): Promise<Debt | null> {
     const { data, error } = await supabase
       .from('debts')
-      .select('*, customer:customers(*), sale:sales(*)')
+      .select('*, customer:customers(*), sale:sales(*, items:sale_items(*, product_variant:product_variants(*, product:products(*)))), payments:debt_payments(*)')
       .eq('id', id)
       .maybeSingle();
 
@@ -3581,6 +3581,289 @@ class ShopRepository {
       dueDate: data.dueDate,
       notes: data.notes,
     }, 'Diiwaangelin Dayn Toos ah');
+  }
+
+  public async createProductDebtTransaction(data: {
+    customerId?: string;
+    customerName?: string;
+    customerPhone?: string;
+    items: CartItem[];
+    amountPaidInitially?: number;
+    dueDate?: string;
+    notes?: string;
+    paymentMethod?: string;
+  }): Promise<{ debt: Debt; sale: Sale }> {
+    await this.checkAdminAuth('Diiwaangelinta Daynta Alaabta');
+
+    const items = data.items || [];
+    if (items.length === 0) {
+      throw new Error('Ma jiro wax alaab ah oo la doortay (No products selected)');
+    }
+
+    // 1. Resolve Customer (Reuse existing customer if phone matches, never duplicate)
+    let customerId = data.customerId;
+    const phone = data.customerPhone?.trim();
+    const name = data.customerName?.trim();
+
+    if (!customerId && phone) {
+      const { data: existingCust } = await supabase
+        .from('customers')
+        .select('*')
+        .eq('phone', phone)
+        .maybeSingle();
+
+      if (existingCust) {
+        customerId = existingCust.id;
+      } else {
+        if (!name) {
+          throw new Error('Geli magaca macmiilka cusub');
+        }
+        const createdCust = await this.createCustomer({
+          name,
+          phone,
+          notes: data.notes || undefined,
+        }, 'Macmiil cusub oo dayn alaab ah qaatay');
+        customerId = createdCust.id;
+      }
+    } else if (!customerId) {
+      throw new Error('Fadlan dooro ama geli xogta macmiilka (Name & Phone required)');
+    }
+
+    // 2. Validate stock sufficiency & fractional quantities for all items
+    for (const item of items) {
+      const isAmountBased = item.variant?.management_mode === 'amount_based' || item.actual_quantity_used !== undefined;
+      const qtyToDeduct = isAmountBased && item.actual_quantity_used !== undefined 
+        ? Number(item.actual_quantity_used) 
+        : Number(item.quantity);
+
+      const { data: curVar } = await supabase
+        .from('product_variants')
+        .select('stock_quantity, selling_unit, variant_name, product:products(name), minimum_stock, sku, barcode')
+        .eq('id', item.variant.id)
+        .single();
+
+      const currentStock = Number(curVar?.stock_quantity ?? item.variant.stock_quantity ?? 0);
+      const unitLabel = curVar?.selling_unit || item.variant.selling_unit || 'xabo';
+      const itemName = (curVar?.product as any)?.name || item.product?.name || item.variant?.variant_name || 'Alaabta';
+
+      const isMoneyOil = Boolean(item.selling_option_label || (item as any).amount_based_value);
+      if (!isMoneyOil) {
+        const step = getVariantStep(item.variant);
+        const val = isValidSellableQuantity(Number(item.quantity), step, unitLabel, item.variant.management_mode);
+        if (!val.valid) {
+          throw new Error(`Tirada la iibinayo ma aha qeyb sax ah (${itemName}): ${val.reason}`);
+        }
+      }
+
+      if (currentStock < qtyToDeduct) {
+        throw new Error(`Kaydka alaabtan kuma filna. (${itemName}): Waxaa haray kaliya ${currentStock} ${unitLabel}, laakiin waxaa la rabaa ${qtyToDeduct} ${unitLabel}.`);
+      }
+    }
+
+    // 3. Totals and Debt Calculation
+    const saleCalc = calculateSaleTotal(items, 0);
+    const subtotal = saleCalc.subtotal;
+    const costAmount = saleCalc.costAmount;
+    const totalAmount = saleCalc.totalAmount;
+    const paidInitially = Math.max(0, Number(data.amountPaidInitially || 0));
+
+    if (paidInitially > totalAmount) {
+      throw new Error('Lacagta la bixiyey kama badnaan karto wadarta daynta.');
+    }
+
+    const remainingDebt = Math.max(0, Math.round((totalAmount - paidInitially) * 100) / 100);
+    const grossProfit = saleCalc.grossProfit;
+    const debtStatus = remainingDebt === 0 ? 'paid' : (paidInitially > 0 ? 'partial' : 'unpaid');
+
+    const saleId = generateId();
+    const debtId = generateId();
+
+    // 4. Create Sale Record
+    const saleMethod: PaymentMethod = remainingDebt === 0 
+      ? ((data.paymentMethod as PaymentMethod) || 'cash') 
+      : (paidInitially > 0 ? 'partial' : 'credit');
+
+    const { data: createdSale, error: saleErr } = await supabase
+      .from('sales')
+      .insert([{
+        id: saleId,
+        customer_id: customerId,
+        subtotal,
+        discount: 0,
+        total_amount: totalAmount,
+        amount_paid: paidInitially,
+        debt_amount: remainingDebt,
+        cost_amount: roundToCents(costAmount),
+        gross_profit: roundToCents(grossProfit),
+        payment_method: saleMethod,
+        notes: data.notes || 'Dayn Alaabeed (Product-based customer debt)',
+        created_at: new Date().toISOString(),
+      }])
+      .select()
+      .single();
+
+    if (saleErr) {
+      throw new Error(`Khalad diiwaangelinta iibka daynta: ${saleErr.message}`);
+    }
+
+    // 5. Insert Sale Items and Deduct Stock
+    for (const item of items) {
+      const isAmountBased = item.variant?.management_mode === 'amount_based' || item.actual_quantity_used !== undefined;
+      const actualLitersUsed = isAmountBased && item.actual_quantity_used !== undefined ? Number(item.actual_quantity_used) : Number(item.quantity);
+      let itemLineTotal = Math.round(item.quantity * item.unitPrice * 100) / 100;
+
+      // Active FIFO batch
+      let activeBatch: ProductBatch | null = await this.getActiveBatch(item.variant.id);
+      let effectiveUnitCost = item.unitCost;
+      if (activeBatch) {
+        effectiveUnitCost = activeBatch.cost_per_unit || activeBatch.cost_per_liter || item.unitCost;
+        const qtyToDeduct = isAmountBased ? actualLitersUsed : Number(item.quantity);
+        const remainingQty = Number(activeBatch.remaining_quantity || 0);
+        const newBatchRemaining = Math.max(0, Number((remainingQty - qtyToDeduct).toFixed(4)));
+        await this.updateBatchRemaining(activeBatch.id, newBatchRemaining);
+      }
+
+      const itemCostTotal = isAmountBased ? cleanPrecision(actualLitersUsed * effectiveUnitCost) : cleanPrecision(item.quantity * effectiveUnitCost);
+      const itemProfit = cleanPrecision(itemLineTotal - itemCostTotal);
+
+      const saleItemPayload: any = {
+        id: generateId(),
+        sale_id: saleId,
+        product_variant_id: item.variant.id,
+        quantity: isAmountBased && item.actual_quantity_used !== undefined && Number(item.actual_quantity_used) > 0 ? Number(item.actual_quantity_used) : Number(item.quantity),
+        unit: item.variant.selling_unit,
+        unit_price: item.unitPrice,
+        unit_cost: effectiveUnitCost,
+        discount: 0,
+        total_price: itemLineTotal,
+        gross_profit: roundToCents(itemProfit),
+        batch_id: activeBatch?.id || null,
+        actual_quantity_used: isAmountBased ? actualLitersUsed : null,
+        selling_method: item.selling_method || (isAmountBased ? 'measure' : 'liter'),
+        selling_option_label: item.selling_option_label || null,
+        created_at: new Date().toISOString(),
+      };
+
+      const { error: saleItemErr } = await supabase.from('sale_items').insert([saleItemPayload]);
+      if (saleItemErr) {
+        const { batch_id, actual_quantity_used, selling_option_label, selling_method, ...fallbackSaleItem } = saleItemPayload;
+        await supabase.from('sale_items').insert([fallbackSaleItem]);
+      }
+
+      // Deduct stock in product_variants
+      const { data: curVar } = await supabase.from('product_variants').select('stock_quantity, selling_unit, minimum_stock, sku, barcode').eq('id', item.variant.id).single();
+      const prevStock = Number(curVar?.stock_quantity || 0);
+      const qtyDeducted = isAmountBased ? actualLitersUsed : Number(item.quantity);
+      const newStock = Math.max(0, Number((prevStock - qtyDeducted).toFixed(4)));
+      const minStock = Number(curVar?.minimum_stock || item.variant?.minimum_stock || 10);
+
+      await supabase.from('product_variants').update({
+        stock_quantity: newStock,
+        updated_at: new Date().toISOString(),
+      }).eq('id', item.variant.id);
+
+      await supabase.from('stock_movements').insert([{
+        id: generateId(),
+        product_variant_id: item.variant.id,
+        type: 'sale',
+        quantity: -qtyDeducted,
+        previous_quantity: prevStock,
+        new_quantity: newStock,
+        unit: curVar?.selling_unit || item.variant.selling_unit,
+        reference_id: saleId,
+        reference_type: 'sale',
+        notes: `Dayn Alaabeed: #${saleId.slice(0, 8)}${item.selling_option_label ? ' (' + item.selling_option_label + ')' : ''}`,
+        created_at: new Date().toISOString(),
+      }]);
+
+      if (newStock <= minStock) {
+        this.triggerStockAlert({
+          variantId: item.variant.id,
+          productName: item.product?.name || 'Alaab',
+          variantName: item.variant?.variant_name || 'Default',
+          currentStock: newStock,
+          minimumStock: minStock,
+          unit: curVar?.selling_unit || item.variant?.selling_unit || 'kg',
+          sku: curVar?.sku || item.variant?.sku,
+          barcode: curVar?.barcode || item.variant?.barcode,
+        });
+      }
+    }
+
+    // 6. Create Debts Record
+    const itemsSummary = items.map(i => {
+      const prodName = i.product?.name || i.variant?.variant_name || 'Alaab';
+      const label = i.selling_option_label ? ` (${i.selling_option_label})` : ` (${i.quantity} ${i.variant?.selling_unit || ''})`;
+      return `${prodName}${label}`;
+    }).join(', ');
+
+    const { data: createdDebt, error: debtErr } = await supabase
+      .from('debts')
+      .insert([{
+        id: debtId,
+        customer_id: customerId,
+        sale_id: saleId,
+        items_summary: itemsSummary,
+        original_amount: totalAmount,
+        amount_paid: paidInitially,
+        remaining_balance: remainingDebt,
+        due_date: data.dueDate || null,
+        status: debtStatus,
+        notes: data.notes || 'Dayn Alaabeed',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }])
+      .select('*, customer:customers(*), sale:sales(*, items:sale_items(*, product_variant:product_variants(*, product:products(*))))')
+      .single();
+
+    if (debtErr) {
+      throw new Error(`Khalad diiwaangelinta daynta: ${debtErr.message}`);
+    }
+
+    // 7. Initial Payment Record
+    if (paidInitially > 0) {
+      await supabase.from('debt_payments').insert([{
+        id: generateId(),
+        customer_id: customerId,
+        debt_id: debtId,
+        amount: paidInitially,
+        payment_method: data.paymentMethod || 'cash',
+        notes: 'Lacag hormaris ah oo la bixiyey xilligii qaadashada daynta (Initial Payment)',
+        created_at: new Date().toISOString(),
+      }]);
+    }
+
+    // 8. Update Customer Debt Balances
+    const { data: cust } = await supabase.from('customers').select('*').eq('id', customerId).single();
+    if (cust) {
+      await supabase.from('customers').update({
+        total_debt: Number((Number(cust.total_debt || 0) + totalAmount).toFixed(2)),
+        paid_debt: Number((Number(cust.paid_debt || 0) + paidInitially).toFixed(2)),
+        remaining_debt: Number((Number(cust.remaining_debt || 0) + remainingDebt).toFixed(2)),
+        updated_at: new Date().toISOString(),
+      }).eq('id', customerId);
+    }
+
+    // 9. Audit Log
+    await this.recordAuditLog(
+      'CREATE_DEBT',
+      'debt',
+      debtId,
+      undefined,
+      createdDebt,
+      `Dayn Alaabeed: $${totalAmount} (La bixiyey: $${paidInitially}, Haraa: $${remainingDebt}) - Macmiil: ${cust?.name || customerId}`
+    );
+
+    const { data: finalSale } = await supabase
+      .from('sales')
+      .select('*, customer:customers(*), items:sale_items(*, product_variant:product_variants(*, product:products(*)))')
+      .eq('id', saleId)
+      .single();
+
+    return {
+      debt: createdDebt as Debt,
+      sale: finalSale as Sale,
+    };
   }
 
   public async addCustomerCallLog(debtId: string, note: string): Promise<void> {

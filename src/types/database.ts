@@ -380,6 +380,7 @@ export interface Debt {
   updated_at: string;
   customer?: Customer;
   sale?: Sale;
+  payments?: DebtPayment[];
 }
 
 export interface DebtPayment {
