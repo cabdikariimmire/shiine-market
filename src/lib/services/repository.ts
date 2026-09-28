@@ -2970,7 +2970,7 @@ class ShopRepository {
         id: generateId(),
         sale_id: saleId,
         product_variant_id: item.variant.id,
-        quantity: item.quantity,
+        quantity: isAmountBased && item.actual_quantity_used !== undefined && Number(item.actual_quantity_used) > 0 ? Number(item.actual_quantity_used) : Number(item.quantity),
         unit: item.variant.selling_unit,
         unit_price: item.unitPrice,
         unit_cost: effectiveUnitCost,
@@ -4303,10 +4303,12 @@ class ShopRepository {
       const items = (s as any).items || [];
       if (items.length > 0) {
         for (const item of items) {
-          const qty = Number(item.quantity || 0);
+          const actualQty = (item.actual_quantity_used !== undefined && item.actual_quantity_used !== null && Number(item.actual_quantity_used) > 0)
+            ? Number(item.actual_quantity_used)
+            : Number(item.quantity || 0);
           const unitCost = item.unit_cost !== undefined && item.unit_cost !== null ? Number(item.unit_cost) : 0;
-          const lineTotal = Number(item.total_price || (qty * Number(item.unit_price || 0)));
-          const lineCost = qty * unitCost;
+          const lineTotal = Number(item.total_price || (actualQty * Number(item.unit_price || 0)));
+          const lineCost = cleanPrecision(actualQty * unitCost);
           const lineProfit = unitCost > 0 ? cleanPrecision(lineTotal - lineCost) : Number(item.gross_profit || 0);
           
           totalCostOfGoodsExact += lineCost;
@@ -4432,10 +4434,12 @@ class ShopRepository {
       const items = (s as any).items || [];
       if (items.length > 0) {
         for (const item of items) {
-          const qty = Number(item.quantity || 0);
+          const actualQty = (item.actual_quantity_used !== undefined && item.actual_quantity_used !== null && Number(item.actual_quantity_used) > 0)
+            ? Number(item.actual_quantity_used)
+            : Number(item.quantity || 0);
           const unitCost = item.unit_cost !== undefined && item.unit_cost !== null ? Number(item.unit_cost) : 0;
-          const lineTotal = Number(item.total_price || (qty * Number(item.unit_price || 0)));
-          const lineCost = qty * unitCost;
+          const lineTotal = Number(item.total_price || (actualQty * Number(item.unit_price || 0)));
+          const lineCost = cleanPrecision(actualQty * unitCost);
           const lineProfit = unitCost > 0 ? cleanPrecision(lineTotal - lineCost) : Number(item.gross_profit || 0);
           
           grouped[date].cogs += lineCost;
@@ -4600,9 +4604,12 @@ class ShopRepository {
         const vName = pv?.variant_name || '';
         const unit = item.unit || pv?.selling_unit || 'KG';
         const lineTotal = Number(item.total_price || 0);
-        const lineQty = Number(Number(item.quantity || 0).toFixed(4));
+        const actualQty = (item.actual_quantity_used !== undefined && item.actual_quantity_used !== null && Number(item.actual_quantity_used) > 0)
+          ? Number(item.actual_quantity_used)
+          : Number(item.quantity || 0);
+        const lineQty = Number(actualQty.toFixed(4));
         const unitCost = item.unit_cost !== undefined && item.unit_cost !== null ? Number(item.unit_cost) : 0;
-        const lineCost = lineQty * unitCost;
+        const lineCost = cleanPrecision(lineQty * unitCost);
         // Exact profit calculation from actual sold quantity and exact unit cost:
         const lineProfit = unitCost > 0 ? cleanPrecision(lineTotal - lineCost) : Number(item.gross_profit || 0);
 

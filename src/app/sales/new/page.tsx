@@ -35,7 +35,7 @@ import { BarcodeScannerModal } from '@/components/pos/barcode-modal';
 import { ReceiptModal } from '@/components/pos/receipt-modal';
 import { useToast } from '@/components/ui/toast';
 import { repository } from '@/lib/services/repository';
-import { calculateCartItemLine, calculateSaleTotal, formatMoney } from '@/lib/calculations/financials';
+import { calculateCartItemLine, calculateSaleTotal, formatMoney, cleanPrecision } from '@/lib/calculations/financials';
 import { calculateSosDenomination, formatSos } from '@/lib/calculations/denominations';
 import { 
   calculateCostPerBaseUnit, 
@@ -377,8 +377,8 @@ export default function POSTerminalPage() {
 
       const change = calculateOilChange(customerPayment, selectedOilMeasure.payment_price);
       const lineTotal = selectedOilMeasure.payment_price;
-      const lineCost = Math.round(selectedOilMeasure.quantity_liters * costPerBase * 100) / 100;
-      const lineProfit = Math.round((lineTotal - lineCost) * 100) / 100;
+      const lineCost = cleanPrecision(selectedOilMeasure.quantity_liters * costPerBase);
+      const lineProfit = cleanPrecision(lineTotal - lineCost);
 
       const cartItemId = `${selectedOilVariant.id}_measure_${selectedOilMeasure.code || selectedOilMeasure.id}_${Date.now()}`;
 

@@ -102,11 +102,14 @@ export function calculateCartItemLine(
   }
 
   // 3. Standard Fixed USD mode (Mode B)
+  const effectiveCostQty = (options?.actualQuantityUsed !== undefined && options.actualQuantityUsed > 0)
+    ? options.actualQuantityUsed
+    : safeQty;
   const rawLineTotal = safeUnitPrice * safeQty;
   const safeDiscount = Math.max(0, Math.min(itemDiscount, rawLineTotal));
 
   const totalPrice = roundToCents(rawLineTotal - safeDiscount);
-  const totalCost = cleanPrecision(safeCost * safeQty);
+  const totalCost = cleanPrecision(safeCost * effectiveCostQty);
   const grossProfit = cleanPrecision(totalPrice - totalCost);
 
   return { totalPrice, grossProfit, totalCost };
@@ -146,9 +149,11 @@ export function calculateSaleTotal(
     const price = 'unitPrice' in item ? item.unitPrice : item.unit_price;
     const cost = 'unitCost' in item ? item.unitCost : item.unit_cost;
     const disc = item.discount || 0;
-    const actualQty = ('actual_quantity_used' in item && item.actual_quantity_used !== undefined && item.actual_quantity_used > 0)
+    const effectiveCostQty = ('actual_quantity_used' in item && typeof item.actual_quantity_used === 'number' && item.actual_quantity_used > 0)
       ? item.actual_quantity_used
-      : (('actualQuantityUsed' in item && (item as any).actualQuantityUsed > 0) ? (item as any).actualQuantityUsed : qty);
+      : (('actualQuantityUsed' in item && typeof (item as any).actualQuantityUsed === 'number' && (item as any).actualQuantityUsed > 0) 
+          ? (item as any).actualQuantityUsed 
+          : qty);
 
     const isAmountBased = ('management_mode' in item && item.management_mode === 'amount_based')
       || ('variant' in item && item.variant?.management_mode === 'amount_based')
@@ -164,11 +169,11 @@ export function calculateSaleTotal(
     if (isAmountBased && amountVal && amountVal > 0) {
       if (amountCurrency === 'SOS') {
         totalSos += Math.round(amountVal);
-        rawCostAmount += (cost * actualQty);
+        rawCostAmount += (cost * effectiveCostQty);
         itemDiscounts += disc;
       } else {
         fixedSubtotal += amountVal;
-        rawCostAmount += (cost * actualQty);
+        rawCostAmount += (cost * effectiveCostQty);
         itemDiscounts += disc;
       }
       continue;
@@ -189,12 +194,12 @@ export function calculateSaleTotal(
     if (mode === 'denomination' && itemSosPrice > 0) {
       const lineSos = Math.round(itemSosPrice * qty);
       totalSos += lineSos;
-      rawCostAmount += (cost * qty);
+      rawCostAmount += (cost * effectiveCostQty);
       itemDiscounts += disc;
     } else {
       const lineTotal = price * qty;
       fixedSubtotal += lineTotal;
-      rawCostAmount += (cost * qty);
+      rawCostAmount += (cost * effectiveCostQty);
       itemDiscounts += disc;
     }
   }
